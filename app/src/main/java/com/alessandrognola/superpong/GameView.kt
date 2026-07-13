@@ -8,10 +8,12 @@ import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Shader
+import android.graphics.Typeface
 import android.util.TypedValue
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import androidx.core.content.res.ResourcesCompat
 import kotlin.math.max
 import kotlin.math.min
 
@@ -93,35 +95,50 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
 
     private var lastFrameNanos = 0L
 
+    private val gameFont: Typeface? = try {
+        ResourcesCompat.getFont(context, R.font.bubblegum_sans)
+    } catch (e: Exception) { null }
+
+    // --- candy-game palette ---
+    private val colorSkyBlue = Color.parseColor("#2FA8F0")
+    private val colorLeafGreen = Color.parseColor("#7CC13B")
+    private val colorGold = Color.parseColor("#FFB300")
+    private val colorOutline = Color.parseColor("#123C6B")
+
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val hudPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
         textSize = dp(20f)
         isFakeBoldText = true
+        typeface = gameFont
     }
     private val levelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
         textAlign = Paint.Align.CENTER
         textSize = dp(16f)
         alpha = 200
+        typeface = gameFont
     }
     private val bigPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
         textAlign = Paint.Align.CENTER
         textSize = dp(32f)
         isFakeBoldText = true
+        typeface = gameFont
     }
     private val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
         textAlign = Paint.Align.CENTER
-        textSize = dp(38f)
+        textSize = dp(40f)
         isFakeBoldText = true
+        typeface = gameFont
     }
     private val buttonTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
         textAlign = Paint.Align.CENTER
-        textSize = dp(20f)
+        textSize = dp(22f)
         isFakeBoldText = true
+        typeface = gameFont
     }
 
     init {
@@ -143,6 +160,30 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         (Color.green(color) * (1 - factor)).toInt().coerceIn(0, 255),
         (Color.blue(color) * (1 - factor)).toInt().coerceIn(0, 255)
     )
+
+    private fun drawOutlinedText(canvas: Canvas, text: String, x: Float, y: Float, fillPaint: Paint) {
+        val outline = Paint(fillPaint).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = dp(3f)
+            color = colorOutline
+        }
+        canvas.drawText(text, x, y, outline)
+        canvas.drawText(text, x, y, fillPaint)
+    }
+
+    private fun drawBeveledButton(canvas: Canvas, rect: RectF, baseColor: Int) {
+        paint.shader = LinearGradient(
+            rect.left, rect.top, rect.left, rect.bottom,
+            lighten(baseColor, 0.25f), darken(baseColor, 0.15f), Shader.TileMode.CLAMP
+        )
+        canvas.drawRoundRect(rect, dp(14f), dp(14f), paint)
+        paint.shader = null
+
+        paint.color = darken(baseColor, 0.45f)
+        paint.alpha = 200
+        canvas.drawRoundRect(RectF(rect.left, rect.bottom - dp(7f), rect.right, rect.bottom), dp(10f), dp(10f), paint)
+        paint.alpha = 255
+    }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
         screenW = width
@@ -427,9 +468,8 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         }
 
         // paddle
-        paint.color = Color.parseColor("#29B6F6")
         val paddleRect = RectF(paddleX - paddleW / 2f, paddleY, paddleX + paddleW / 2f, paddleY + paddleH)
-        canvas.drawRoundRect(paddleRect, dp(9f), dp(9f), paint)
+        drawBeveledButton(canvas, paddleRect, colorSkyBlue)
 
         // ball (naturally off-screen once missed, so no extra visibility check needed)
         paint.color = ballColor
@@ -443,13 +483,13 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
                 canvas.drawColor(Color.argb(160, 0, 0, 0))
                 drawParticles(canvas)
                 if (isLastLevel()) {
-                    canvas.drawText("CONGRATULATIONS!", screenW / 2f, screenH / 2f - dp(20f), bigPaint)
+                    drawOutlinedText(canvas, "CONGRATULATIONS!", screenW / 2f, screenH / 2f - dp(20f), bigPaint)
                     val sub = Paint(bigPaint).apply { textSize = dp(20f) }
                     canvas.drawText("You completed all levels", screenW / 2f, screenH / 2f + dp(20f), sub)
                     canvas.drawText("Score: $score", screenW / 2f, screenH / 2f + dp(50f), sub)
                     canvas.drawText("Tap to restart", screenW / 2f, screenH / 2f + dp(86f), sub)
                 } else {
-                    canvas.drawText("LEVEL COMPLETE", screenW / 2f, screenH / 2f - dp(20f), bigPaint)
+                    drawOutlinedText(canvas, "LEVEL COMPLETE", screenW / 2f, screenH / 2f - dp(20f), bigPaint)
                     val sub = Paint(bigPaint).apply { textSize = dp(20f) }
                     canvas.drawText("Score: $score", screenW / 2f, screenH / 2f + dp(20f), sub)
                     canvas.drawText("Tap to continue", screenW / 2f, screenH / 2f + dp(56f), sub)
@@ -458,7 +498,7 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
             GameState.GAME_OVER -> {
                 canvas.drawColor(Color.argb(160, 0, 0, 0))
                 drawParticles(canvas)
-                canvas.drawText("GAME OVER", screenW / 2f, screenH / 2f - dp(20f), bigPaint)
+                drawOutlinedText(canvas, "GAME OVER", screenW / 2f, screenH / 2f - dp(20f), bigPaint)
                 val sub = Paint(bigPaint).apply { textSize = dp(20f) }
                 canvas.drawText("Score: $score", screenW / 2f, screenH / 2f + dp(20f), sub)
                 canvas.drawText("Best: $topScore", screenW / 2f, screenH / 2f + dp(50f), sub)
@@ -573,10 +613,13 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         paint.alpha = 255
 
         hudPaint.textAlign = Paint.Align.LEFT
+        hudPaint.color = colorGold
         canvas.drawText("Score: $score", dp(16f), dp(30f), hudPaint)
         hudPaint.textAlign = Paint.Align.RIGHT
+        hudPaint.color = colorLeafGreen
         canvas.drawText("Lives: $lives", screenW - dp(16f), dp(30f), hudPaint)
         hudPaint.textAlign = Paint.Align.LEFT
+        hudPaint.color = Color.WHITE
 
         canvas.drawText(
             "Level ${levelIndex + 1}/$totalLevels  ·  ${currentRows()} rows",
@@ -647,16 +690,14 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         paint.alpha = 70
         canvas.drawRect(0f, screenH * 0.14f, screenW.toFloat(), screenH * 0.14f + dp(56f), paint)
         paint.alpha = 255
-        canvas.drawText("SUPER PONG", screenW / 2f, screenH * 0.14f + dp(40f), titlePaint)
+        drawOutlinedText(canvas, "SUPER PONG", screenW / 2f, screenH * 0.14f + dp(40f), titlePaint)
 
         val rects = menuButtonRects()
         val labels = listOf("New Game", "Top Score", "Change Background")
+        val buttonColors = listOf(colorSkyBlue, colorGold, colorLeafGreen)
         for (i in rects.indices) {
-            paint.color = Color.parseColor("#29B6F6")
-            paint.alpha = 235
-            canvas.drawRoundRect(rects[i], dp(14f), dp(14f), paint)
-            paint.alpha = 255
-            canvas.drawText(labels[i], rects[i].centerX(), rects[i].centerY() + dp(7f), buttonTextPaint)
+            drawBeveledButton(canvas, rects[i], buttonColors[i])
+            drawOutlinedText(canvas, labels[i], rects[i].centerX(), rects[i].centerY() + dp(7f), buttonTextPaint)
         }
     }
 
@@ -668,9 +709,9 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         canvas.drawRect(0f, screenH * 0.14f, screenW.toFloat(), screenH * 0.5f, paint)
         paint.alpha = 255
 
-        canvas.drawText("TOP SCORE", screenW / 2f, screenH * 0.22f, titlePaint)
-        val scorePaint = Paint(bigPaint).apply { textSize = dp(44f) }
-        canvas.drawText("$topScore", screenW / 2f, screenH * 0.34f, scorePaint)
+        drawOutlinedText(canvas, "TOP SCORE", screenW / 2f, screenH * 0.22f, titlePaint)
+        val scorePaint = Paint(bigPaint).apply { textSize = dp(44f); color = colorGold }
+        drawOutlinedText(canvas, "$topScore", screenW / 2f, screenH * 0.34f, scorePaint)
         canvas.drawText("(best score on this device)", screenW / 2f, screenH * 0.34f + dp(34f), levelPaint)
 
         drawBackButton(canvas)
@@ -683,8 +724,8 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         paint.alpha = 70
         canvas.drawRect(0f, screenH * 0.08f, screenW.toFloat(), screenH * 0.08f + dp(50f), paint)
         paint.alpha = 255
-        canvas.drawText(
-            "CHOOSE BACKGROUND", screenW / 2f, screenH * 0.08f + dp(36f),
+        drawOutlinedText(
+            canvas, "CHOOSE BACKGROUND", screenW / 2f, screenH * 0.08f + dp(36f),
             Paint(titlePaint).apply { textSize = dp(24f) }
         )
 
@@ -714,7 +755,7 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
             paint.alpha = 120
             canvas.drawRect(rects[i].left, rects[i].bottom - dp(26f), rects[i].right, rects[i].bottom, paint)
             paint.alpha = 255
-            canvas.drawText(names[i], rects[i].centerX(), rects[i].bottom - dp(8f), buttonTextPaint)
+            drawOutlinedText(canvas, names[i], rects[i].centerX(), rects[i].bottom - dp(8f), buttonTextPaint)
         }
 
         drawBackButton(canvas)
@@ -722,11 +763,8 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
 
     private fun drawBackButton(canvas: Canvas) {
         val r = backButtonRect()
-        paint.color = Color.WHITE
-        paint.alpha = 40
-        canvas.drawRoundRect(r, dp(10f), dp(10f), paint)
-        paint.alpha = 255
-        canvas.drawText("< Back", r.centerX(), r.centerY() + dp(7f), buttonTextPaint)
+        drawBeveledButton(canvas, r, Color.parseColor("#78909C"))
+        drawOutlinedText(canvas, "< Back", r.centerX(), r.centerY() + dp(7f), buttonTextPaint)
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
