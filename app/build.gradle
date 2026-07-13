@@ -32,8 +32,18 @@ android {
     }
 }
 
+configurations.all {
+    resolutionStrategy {
+        // billing/games-v2 pull in a newer androidx.core that requires compileSdk 35;
+        // pin back to a compileSdk-34-compatible version instead of bumping compileSdk.
+        force 'androidx.core:core:1.13.1'
+        force 'androidx.core:core-ktx:1.13.1'
+    }
+}
+
 dependencies {
     implementation 'androidx.core:core-ktx:1.13.1'
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'com.google.android.gms:play-services-games-v2:21.0.0'
+    implementation 'com.android.billingclient:billing:9.1.0'
 }
