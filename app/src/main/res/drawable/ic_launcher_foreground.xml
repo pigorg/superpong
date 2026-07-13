@@ -4,16 +4,19 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+    <!-- ball -->
     <path
-        android:fillColor="#EC407A"
-        android:pathData="M24,40h60v10h-60z" />
-    <path
-        android:fillColor="#29B6F6"
-        android:pathData="M24,52h60v10h-60z" />
-    <path
-        android:fillColor="#66BB6A"
-        android:pathData="M24,64h60v10h-60z" />
+        android:fillColor="#FFEB3B"
+        android:pathData="M54,40m-12,0a12,12 0,1 1,24 0a12,12 0,1 1,-24 0" />
+    <!-- small bounce sparkles -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M54,86m-8,0a8,8 0,1 1,16 0a8,8 0,1 1,-16 0" />
+        android:pathData="M34,62m-2.5,0a2.5,2.5 0,1 1,5 0a2.5,2.5 0,1 1,-5 0" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M74,62m-2.5,0a2.5,2.5 0,1 1,5 0a2.5,2.5 0,1 1,-5 0" />
+    <!-- paddle -->
+    <path
+        android:fillColor="#29B6F6"
+        android:pathData="M28,74 h52 a6,6 0,0 1,6 6 v0 a6,6 0,0 1,-6 6 h-52 a6,6 0,0 1,-6 -6 v0 a6,6 0,0 1,6 -6 z" />
 </vector>
