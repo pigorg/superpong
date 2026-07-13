@@ -1,0 +1,5 @@
+<resources>
+    <!-- TODO: replace with the real Play Games Services App ID from Play Console
+         (Play Console > Play Games Services > Setup > Configuration). -->
+    <string name="game_services_app_id" translatable="false">000000000000</string>
+</resources>
