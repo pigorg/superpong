@@ -9,11 +9,10 @@ import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.RadialGradient
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
-import android.media.AudioAttributes
-import android.media.SoundPool
 import android.util.TypedValue
 import android.view.MotionEvent
 import android.view.SurfaceHolder
@@ -30,16 +29,15 @@ private data class Particle(
     var life: Float, val totalLife: Float, val color: Int, val radius: Float
 )
 
-private enum class ObstacleType { ROCKET, PIG, EAGLE, GOLDFISH }
-private data class Obstacle(var x: Float, var y: Float, val vx: Float, val type: ObstacleType, var bounceCooldown: Float = 0f)
-
-private data class Projectile(var x: Float, var y: Float, val vy: Float, val isBomb: Boolean = false)
-
-private data class DiamondDecor(val x: Float, val y: Float, val r: Float, val color: Int)
-
-private enum class GameState { MENU, TOP_SCORE, BACKGROUND_SELECT, BUY_GEMS, ACCOUNT, PLAYING, LEVEL_CLEARED, GAME_OVER }
+private enum class GameState { MENU, TOP_SCORE, OPTIONS, SHOP, ACCOUNT, PLAYING, LEVEL_CLEARED, GAME_OVER }
 private enum class PendingAction { NONE, NEXT_LEVEL, RESTART_GAME }
-private enum class BgTheme { GRID, SPACE, SKY, DIAMONDS }
+private enum class ThemePack { NONE, SOCCER, BASKETBALL, HOCKEY, SPACE }
+
+private enum class DecorShape { GRIDLINES, DOTS, RINGS, DIAMONDS, TRIANGLES, STRIPES, MOON_CLOUDS }
+private data class BgStyle(val name: String, val top: Int, val bottom: Int, val accent: Int, val shape: DecorShape, val density: Int = 22)
+
+private enum class BallPattern { SOLID, STRIPES, DOTS, CHECKER, RING, METALLIC }
+private data class BallStyle(val name: String, val base: Int, val accent: Int, val pattern: BallPattern)
 
 class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback, Runnable {
 
@@ -53,33 +51,22 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
     private var topScore = prefs.getInt("top_score", 0)
     private var gems = prefs.getInt("gems", 0)
     @Volatile private var pendingGemGrant = 0
-    @Volatile private var bgTheme = BgTheme.values()[prefs.getInt("bg_theme", BgTheme.SPACE.ordinal)]
-    @Volatile private var hardMode = false
+    @Volatile private var bgIndex = prefs.getInt("bg_index", 0)
+    @Volatile private var ballIndex = prefs.getInt("ball_index", 0)
+    @Volatile private var optionsTab = 0 // 0 = background grid, 1 = ball grid
 
-    private val obstacles = mutableListOf<Obstacle>()
-    private var obstacleSpawnTimer = 4f
-    private val obstacleHalfW = dp(22f)
-    private val obstacleHalfH = dp(14f)
     private val gemBlockColor = Color.parseColor("#8E24AA")
 
-    // --- store power-ups: 0=cannon, 1=double cannon (upgrades cannon), 2=bombs ---
-    private var cannonLevel = prefs.getInt("cannon_level", 0)
-    private var bombsUnlocked = prefs.getBoolean("bombs_unlocked", false)
-    private var cannonFireTimer = 0f
-    private val cannonInterval = 1.4f
-    private var bombCooldown = 0f
-    private val bombCooldownDuration = 5f
-    private val projectiles = mutableListOf<Projectile>()
-    @Volatile private var pendingStorePurchase = -1
-    @Volatile private var pendingBombLaunch = false
-    @Volatile private var pendingRemoveAccessory = -1
+    // --- Shop: 4 real-money theme packs (bg + ball + block skin bundle) ---
+    private var themeSoccerOwned = prefs.getBoolean("theme_soccer_owned", false)
+    private var themeBasketballOwned = prefs.getBoolean("theme_basketball_owned", false)
+    private var themeHockeyOwned = prefs.getBoolean("theme_hockey_owned", false)
+    private var themeSpaceOwned = prefs.getBoolean("theme_space_owned", false)
+    @Volatile private var activeThemePack = ThemePack.NONE
+    @Volatile private var pendingThemeUnlock: String? = null
+    @Volatile private var pendingShopPurchase = -1
     private var storeMessageText = ""
     private var storeMessageTimer = 0f
-
-    private var soundPool: SoundPool? = null
-    private var laserSoundId = 0
-    private var bombLaunchSoundId = 0
-    private var explosionSoundId = 0
 
     // --- reward crates: pop up when total gems first cross 100/200/300 ---
     private var crate100Shown = prefs.getBoolean("crate100_shown", false)
@@ -113,7 +100,6 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
     private var ballDx = 0f
     private var ballDy = 0f
     private val baseBallSpeed = dp(260f)
-    private val ballColor = Color.parseColor("#FFEB3B")
 
     private val blocks = mutableListOf<Block>()
     private val blockCols = 6
@@ -217,26 +203,6 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         }
     }
 
-    init {
-        try {
-            val attrs = AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_GAME)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                .build()
-            val pool = SoundPool.Builder().setMaxStreams(6).setAudioAttributes(attrs).build()
-            soundPool = pool
-            laserSoundId = pool.load(context, R.raw.laser, 1)
-            bombLaunchSoundId = pool.load(context, R.raw.bomb_launch, 1)
-            explosionSoundId = pool.load(context, R.raw.explosion, 1)
-        } catch (e: Exception) {
-            soundPool = null
-        }
-    }
-
-    private fun playSound(soundId: Int) {
-        soundPool?.play(soundId, 1f, 1f, 1, 0, 1f)
-    }
-
     private fun dp(v: Float): Float =
         TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, resources.displayMetrics)
 
@@ -267,6 +233,18 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
 
     private fun diamondPath(cx: Float, cy: Float, r: Float): Path =
         Path().apply { moveTo(cx, cy - r); lineTo(cx + r, cy); lineTo(cx, cy + r); lineTo(cx - r, cy); close() }
+
+    private fun pentagonPath(cx: Float, cy: Float, r: Float): Path {
+        val path = Path()
+        for (i in 0 until 5) {
+            val angle = (Math.PI * 2 / 5 * i - Math.PI / 2).toFloat()
+            val x = cx + r * kotlin.math.cos(angle)
+            val y = cy + r * kotlin.math.sin(angle)
+            if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+        }
+        path.close()
+        return path
+    }
 
     private fun starPath(cx: Float, cy: Float, r: Float): Path {
         val path = Path()
@@ -319,115 +297,147 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         }
     }
 
+    private val avatarHairColors = listOf(
+        Color.parseColor("#3E2723"), // brown
+        Color.parseColor("#212121"), // black
+        Color.parseColor("#F9A825"), // blonde
+        Color.parseColor("#D84315"), // red
+        Color.parseColor("#9E9E9E")  // grey
+    )
+
+    private val avatarShirtColors = listOf(
+        Color.parseColor("#EF5350"),
+        Color.parseColor("#42A5F5"),
+        Color.parseColor("#66BB6A"),
+        Color.parseColor("#AB47BC"),
+        Color.parseColor("#FFA726")
+    )
+
     private fun drawAvatarPreset(canvas: Canvas, index: Int, cx: Float, cy: Float, radius: Float) {
-        paint.color = avatarColors[index % avatarColors.size]
+        val badgeColor = avatarColors[index % avatarColors.size]
+        paint.style = Paint.Style.FILL
+        paint.shader = RadialGradient(
+            cx - radius * 0.3f, cy - radius * 0.3f, radius * 1.5f,
+            lighten(badgeColor, 0.35f), darken(badgeColor, 0.2f), Shader.TileMode.CLAMP
+        )
         canvas.drawCircle(cx, cy, radius, paint)
-        when (index % 5) {
-            0 -> drawRobotFace(canvas, cx, cy, radius)
-            1 -> drawCatFace(canvas, cx, cy, radius)
-            2 -> drawAlienFace(canvas, cx, cy, radius)
-            3 -> drawGhostFace(canvas, cx, cy, radius)
-            4 -> drawAstronautFace(canvas, cx, cy, radius)
-        }
+        paint.shader = null
+        drawPersonIcon(
+            canvas, cx, cy, radius,
+            avatarHairColors[index % avatarHairColors.size],
+            avatarShirtColors[index % avatarShirtColors.size]
+        )
     }
 
-    private fun drawBlush(canvas: Canvas, cx: Float, cy: Float, r: Float) {
-        paint.color = Color.parseColor("#FF8A80")
-        paint.alpha = 120
-        canvas.drawCircle(cx - r * 0.34f, cy + r * 0.12f, r * 0.12f, paint)
-        canvas.drawCircle(cx + r * 0.34f, cy + r * 0.12f, r * 0.12f, paint)
-        paint.alpha = 255
-    }
-
-    private fun drawSmile(canvas: Canvas, cx: Float, cy: Float, r: Float, color: Int = Color.parseColor("#3E2723")) {
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = dp(2f)
-        paint.color = color
-        canvas.drawArc(RectF(cx - r * 0.22f, cy, cx + r * 0.22f, cy + r * 0.3f), 15f, 150f, false, paint)
+    private fun drawPersonIcon(canvas: Canvas, cx: Float, cy: Float, r: Float, hairColor: Int, shirtColor: Int) {
+        canvas.save()
+        canvas.clipPath(Path().apply { addCircle(cx, cy, r, Path.Direction.CW) })
         paint.style = Paint.Style.FILL
-    }
 
-    private fun drawEyeShine(canvas: Canvas, cx: Float, cy: Float, r: Float) {
-        paint.color = Color.WHITE
-        paint.alpha = 220
-        canvas.drawCircle(cx - r * 0.06f, cy - r * 0.06f, r * 0.35f, paint)
-        paint.alpha = 255
-    }
+        // neck
+        paint.color = Color.parseColor("#E8A876")
+        canvas.drawRect(RectF(cx - r * 0.12f, cy + r * 0.02f, cx + r * 0.12f, cy + r * 0.3f), paint)
 
-    private fun drawRobotFace(canvas: Canvas, cx: Float, cy: Float, r: Float) {
-        paint.color = Color.parseColor("#37474F")
-        canvas.drawRect(RectF(cx - r * 0.35f, cy - r * 0.15f, cx - r * 0.1f, cy + r * 0.1f), paint)
-        canvas.drawRect(RectF(cx + r * 0.1f, cy - r * 0.15f, cx + r * 0.35f, cy + r * 0.1f), paint)
-        paint.color = Color.parseColor("#4FC3F7")
-        drawEyeShine(canvas, cx - r * 0.22f, cy - r * 0.02f, r * 0.13f)
-        drawEyeShine(canvas, cx + r * 0.22f, cy - r * 0.02f, r * 0.13f)
-        drawSmile(canvas, cx, cy + r * 0.14f, r, Color.parseColor("#4FC3F7"))
-        paint.color = Color.parseColor("#FFEE58")
-        canvas.drawRect(RectF(cx - dp(1.5f), cy - r * 0.75f, cx + dp(1.5f), cy - r * 0.5f), paint)
-        canvas.drawCircle(cx, cy - r * 0.8f, dp(3f), paint)
-    }
+        // shoulders / shirt, shaded top-to-bottom
+        paint.shader = LinearGradient(
+            cx, cy + r * 0.35f, cx, cy + r * 1.5f,
+            lighten(shirtColor, 0.2f), darken(shirtColor, 0.25f), Shader.TileMode.CLAMP
+        )
+        canvas.drawCircle(cx, cy + r * 0.95f, r * 0.64f, paint)
+        paint.shader = null
 
-    private fun drawCatFace(canvas: Canvas, cx: Float, cy: Float, r: Float) {
-        paint.color = avatarColors[1]
-        canvas.drawPath(trianglePath(cx - r * 0.55f, cy - r * 0.35f, cx - r * 0.15f, cy - r * 0.75f, cx - r * 0.1f, cy - r * 0.2f), paint)
-        canvas.drawPath(trianglePath(cx + r * 0.55f, cy - r * 0.35f, cx + r * 0.15f, cy - r * 0.75f, cx + r * 0.1f, cy - r * 0.2f), paint)
+        // collar
+        paint.color = darken(shirtColor, 0.35f)
+        canvas.drawArc(RectF(cx - r * 0.16f, cy + r * 0.16f, cx + r * 0.16f, cy + r * 0.42f), 0f, 180f, false, paint)
+
+        // head, shaded for roundness
+        paint.shader = RadialGradient(
+            cx - r * 0.12f, cy - r * 0.28f, r * 0.55f,
+            Color.parseColor("#FFE0B2"), Color.parseColor("#E0A579"), Shader.TileMode.CLAMP
+        )
+        canvas.drawCircle(cx, cy - r * 0.16f, r * 0.33f, paint)
+        paint.shader = null
+
+        // hair: cap plus short side strands
+        paint.color = hairColor
+        canvas.drawArc(RectF(cx - r * 0.35f, cy - r * 0.5f, cx + r * 0.35f, cy + r * 0.02f), 180f, 180f, false, paint)
+        canvas.drawRect(RectF(cx - r * 0.35f, cy - r * 0.28f, cx - r * 0.27f, cy - r * 0.02f), paint)
+        canvas.drawRect(RectF(cx + r * 0.27f, cy - r * 0.28f, cx + r * 0.35f, cy - r * 0.02f), paint)
+
+        // face: eyes + smile
         paint.color = Color.parseColor("#3E2723")
-        canvas.drawCircle(cx - r * 0.22f, cy - r * 0.05f, dp(3.5f), paint)
-        canvas.drawCircle(cx + r * 0.22f, cy - r * 0.05f, dp(3.5f), paint)
-        drawEyeShine(canvas, cx - r * 0.22f, cy - r * 0.05f, dp(3.5f))
-        drawEyeShine(canvas, cx + r * 0.22f, cy - r * 0.05f, dp(3.5f))
+        canvas.drawCircle(cx - r * 0.11f, cy - r * 0.17f, max(1f, r * 0.035f), paint)
+        canvas.drawCircle(cx + r * 0.11f, cy - r * 0.17f, max(1f, r * 0.035f), paint)
         paint.style = Paint.Style.STROKE
-        paint.strokeWidth = dp(1.2f)
-        paint.color = Color.parseColor("#5D4037")
-        for (dy in intArrayOf(-3, 0, 3)) {
-            canvas.drawLine(cx - r * 0.35f, cy + r * 0.1f + dp(dy.toFloat()), cx - r * 0.6f, cy + r * 0.05f + dp(dy.toFloat()), paint)
-            canvas.drawLine(cx + r * 0.35f, cy + r * 0.1f + dp(dy.toFloat()), cx + r * 0.6f, cy + r * 0.05f + dp(dy.toFloat()), paint)
-        }
+        paint.strokeWidth = max(1f, r * 0.05f)
+        canvas.drawArc(RectF(cx - r * 0.1f, cy - r * 0.09f, cx + r * 0.1f, cy + r * 0.04f), 10f, 160f, false, paint)
         paint.style = Paint.Style.FILL
-        paint.color = Color.parseColor("#EC407A")
-        canvas.drawPath(trianglePath(cx, cy + r * 0.12f, cx - dp(3f), cy + r * 0.04f, cx + dp(3f), cy + r * 0.04f), paint)
-        drawBlush(canvas, cx, cy, r)
-        drawSmile(canvas, cx, cy + r * 0.1f, r)
+
+        canvas.restore()
     }
 
-    private fun drawAlienFace(canvas: Canvas, cx: Float, cy: Float, r: Float) {
-        paint.color = Color.parseColor("#1B5E20")
-        canvas.drawOval(RectF(cx - r * 0.32f, cy - r * 0.25f, cx - r * 0.05f, cy + r * 0.12f), paint)
-        canvas.drawOval(RectF(cx + r * 0.05f, cy - r * 0.25f, cx + r * 0.32f, cy + r * 0.12f), paint)
-        paint.color = Color.WHITE
-        canvas.drawCircle(cx - r * 0.15f, cy - r * 0.1f, dp(3f), paint)
-        canvas.drawCircle(cx + r * 0.15f, cy - r * 0.1f, dp(3f), paint)
-        paint.color = Color.parseColor("#1B5E20")
-        drawEyeShine(canvas, cx - r * 0.15f, cy - r * 0.1f, dp(2f))
-        drawEyeShine(canvas, cx + r * 0.15f, cy - r * 0.1f, dp(2f))
-        drawSmile(canvas, cx, cy + r * 0.18f, r)
+    /** A falling "block" reskinned as a tiny player (Soccer/Basketball/Hockey) or alien ship (Space),
+     *  tinted with the block's row color so the score-band color coding stays readable. */
+    private fun drawThemedBlock(canvas: Canvas, rect: RectF, tint: Int, pack: ThemePack) {
+        when (pack) {
+            ThemePack.SOCCER -> drawSportPlayerBlock(canvas, rect, tint, Color.parseColor("#1B1B1B"))
+            ThemePack.BASKETBALL -> drawSportPlayerBlock(canvas, rect, tint, Color.parseColor("#5D4037"))
+            ThemePack.HOCKEY -> drawSportPlayerBlock(canvas, rect, tint, Color.parseColor("#37474F"))
+            ThemePack.SPACE -> drawAlienShipBlock(canvas, rect, tint)
+            ThemePack.NONE -> {}
+        }
     }
 
-    private fun drawGhostFace(canvas: Canvas, cx: Float, cy: Float, r: Float) {
-        paint.color = Color.parseColor("#212121")
-        canvas.drawCircle(cx - r * 0.2f, cy - r * 0.05f, dp(4f), paint)
-        canvas.drawCircle(cx + r * 0.2f, cy - r * 0.05f, dp(4f), paint)
-        drawEyeShine(canvas, cx - r * 0.2f, cy - r * 0.05f, dp(4f))
-        drawEyeShine(canvas, cx + r * 0.2f, cy - r * 0.05f, dp(4f))
-        drawBlush(canvas, cx, cy, r)
-        paint.color = Color.parseColor("#EC407A")
-        canvas.drawCircle(cx, cy + r * 0.22f, dp(3.5f), paint)
+    private fun drawSportPlayerBlock(canvas: Canvas, rect: RectF, jerseyColor: Int, shortsColor: Int) {
+        val cx = rect.centerX()
+        val w = rect.width()
+        val h = rect.height()
+        val headR = h * 0.16f
+        val headCy = rect.top + h * 0.24f
+        val bodyTop = headCy + headR * 0.85f
+        val bodyBottom = rect.bottom - h * 0.1f
+        val bodyH = bodyBottom - bodyTop
+        val bodyW = w * 0.36f
+
+        paint.style = Paint.Style.FILL
+        paint.color = shortsColor
+        canvas.drawRect(cx - bodyW * 0.5f, bodyTop + bodyH * 0.55f, cx - dp(1f), bodyBottom, paint)
+        canvas.drawRect(cx + dp(1f), bodyTop + bodyH * 0.55f, cx + bodyW * 0.5f, bodyBottom, paint)
+
+        paint.shader = LinearGradient(
+            cx, bodyTop, cx, bodyTop + bodyH * 0.62f,
+            lighten(jerseyColor, 0.25f), darken(jerseyColor, 0.2f), Shader.TileMode.CLAMP
+        )
+        canvas.drawRoundRect(RectF(cx - bodyW / 2f, bodyTop, cx + bodyW / 2f, bodyTop + bodyH * 0.62f), dp(3f), dp(3f), paint)
+        paint.shader = null
+
+        paint.color = Color.parseColor("#FFD9B3")
+        canvas.drawCircle(cx, headCy, headR, paint)
     }
 
-    private fun drawAstronautFace(canvas: Canvas, cx: Float, cy: Float, r: Float) {
+    private fun drawAlienShipBlock(canvas: Canvas, rect: RectF, hullColor: Int) {
+        val cx = rect.centerX()
+        val cy = rect.centerY()
+        val w = rect.width() * 0.8f
+        val h = rect.height() * 0.5f
+
+        paint.style = Paint.Style.FILL
+        paint.shader = LinearGradient(
+            cx, cy - h / 2f, cx, cy + h / 2f,
+            lighten(hullColor, 0.3f), darken(hullColor, 0.25f), Shader.TileMode.CLAMP
+        )
+        canvas.drawOval(RectF(cx - w / 2f, cy - h / 2f, cx + w / 2f, cy + h / 2f), paint)
+        paint.shader = null
+
         paint.color = Color.parseColor("#B3E5FC")
-        canvas.drawCircle(cx, cy, r * 0.65f, paint)
-        paint.color = Color.WHITE
-        paint.alpha = 150
-        canvas.drawCircle(cx - r * 0.2f, cy - r * 0.25f, r * 0.15f, paint)
+        paint.alpha = 200
+        canvas.drawOval(RectF(cx - w * 0.22f, cy - h * 0.85f, cx + w * 0.22f, cy + h * 0.05f), paint)
         paint.alpha = 255
-        paint.color = Color.parseColor("#37474F")
-        canvas.drawCircle(cx - r * 0.12f, cy + r * 0.05f, dp(3f), paint)
-        canvas.drawCircle(cx + r * 0.12f, cy + r * 0.05f, dp(3f), paint)
-        drawEyeShine(canvas, cx - r * 0.12f, cy + r * 0.05f, dp(2f))
-        drawEyeShine(canvas, cx + r * 0.12f, cy + r * 0.05f, dp(2f))
-        drawSmile(canvas, cx, cy + r * 0.2f, r)
-        drawBlush(canvas, cx, cy + r * 0.1f, r * 0.8f)
+
+        paint.color = Color.WHITE
+        canvas.drawCircle(cx - w * 0.28f, cy + h * 0.15f, dp(2f), paint)
+        canvas.drawCircle(cx, cy + h * 0.25f, dp(2f), paint)
+        canvas.drawCircle(cx + w * 0.28f, cy + h * 0.15f, dp(2f), paint)
     }
 
     private fun drawBeveledButton(canvas: Canvas, rect: RectF, baseColor: Int) {
@@ -492,8 +502,6 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         resetBall()
         blocks.clear()
         particles.clear()
-        obstacles.clear()
-        obstacleSpawnTimer = 1.5f + (Math.random() * 1.5f).toFloat()
         lives = 3
         state = GameState.PLAYING
         nextRowColorIndex = 0
@@ -534,20 +542,20 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         }
     }
 
+    private val crateBonusGems = intArrayOf(50, 75, 100)
+
     private fun openCrate(tier: Int) {
-        when (tier) {
-            0 -> setCannonLevel(max(cannonLevel, 1))
-            1 -> setCannonLevel(max(cannonLevel, 2))
-            2 -> {
-                bombsUnlocked = true
-                prefs.edit().putBoolean("bombs_unlocked", true).apply()
-            }
-        }
+        gems += crateBonusGems.getOrElse(tier) { 0 }
+        prefs.edit().putInt("gems", gems).apply()
         spawnFireworks()
     }
 
     fun grantGems(amount: Int) {
         pendingGemGrant += amount
+    }
+
+    fun grantTheme(themeId: String) {
+        pendingThemeUnlock = themeId
     }
 
     fun setUsername(name: String) {
@@ -600,106 +608,6 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         }
     }
 
-    private fun spawnObstacle() {
-        val fromLeft = Math.random() < 0.5
-        val type = ObstacleType.values()[(Math.random() * ObstacleType.values().size).toInt()]
-        val topBound = dp(94f)
-        val bottomBound = paddleY - dp(20f)
-        val y = if (bottomBound > topBound) {
-            topBound + (Math.random().toFloat() * (bottomBound - topBound))
-        } else topBound
-        val speed = dp(90f) + (Math.random() * dp(60f)).toFloat()
-        val x = if (fromLeft) -obstacleHalfW else screenW + obstacleHalfW
-        val vx = if (fromLeft) speed else -speed
-        obstacles.add(Obstacle(x, y, vx, type))
-    }
-
-    private fun updateObstacles(dt: Float) {
-        val it = obstacles.iterator()
-        while (it.hasNext()) {
-            val o = it.next()
-            o.x += o.vx * dt
-            if (o.bounceCooldown > 0f) o.bounceCooldown -= dt
-            if ((o.vx > 0 && o.x - obstacleHalfW > screenW) || (o.vx < 0 && o.x + obstacleHalfW < 0)) {
-                it.remove()
-            }
-        }
-    }
-
-    private fun checkObstacleCollisions() {
-        for (o in obstacles) {
-            if (o.bounceCooldown > 0f) continue
-            val left = o.x - obstacleHalfW
-            val right = o.x + obstacleHalfW
-            val top = o.y - obstacleHalfH
-            val bottom = o.y + obstacleHalfH
-            if (ballX + ballR > left && ballX - ballR < right && ballY + ballR > top && ballY - ballR < bottom) {
-                val overlapX = min(ballX + ballR - left, right - (ballX - ballR))
-                val overlapY = min(ballY + ballR - top, bottom - (ballY - ballR))
-                if (overlapX < overlapY) ballDx = -ballDx else ballDy = -ballDy
-                o.bounceCooldown = 0.3f
-            }
-        }
-    }
-
-    private fun fireCannons() {
-        val by = paddleY - dp(6f)
-        if (cannonLevel == 1) {
-            projectiles.add(Projectile(paddleX, by, -dp(240f)))
-        } else if (cannonLevel >= 2) {
-            projectiles.add(Projectile(paddleX - paddleW / 2f + dp(8f), by, -dp(240f)))
-            projectiles.add(Projectile(paddleX + paddleW / 2f - dp(8f), by, -dp(240f)))
-        }
-        playSound(laserSoundId)
-    }
-
-    private fun launchBomb() {
-        projectiles.add(Projectile(paddleX, paddleY - dp(6f), -dp(260f), isBomb = true))
-        bombCooldown = bombCooldownDuration
-        playSound(bombLaunchSoundId)
-    }
-
-    private fun updateProjectiles(dt: Float) {
-        val it = projectiles.iterator()
-        while (it.hasNext()) {
-            val p = it.next()
-            p.y += p.vy * dt
-            if (p.y < -dp(20f)) it.remove()
-        }
-    }
-
-    private fun distanceSq(a: RectF, b: RectF): Float {
-        val dx = a.centerX() - b.centerX()
-        val dy = a.centerY() - b.centerY()
-        return dx * dx + dy * dy
-    }
-
-    private fun checkProjectileCollisions() {
-        val projIt = projectiles.iterator()
-        while (projIt.hasNext()) {
-            val p = projIt.next()
-            val r = if (p.isBomb) dp(11f) else dp(4f)
-            val hit = blocks.firstOrNull { b ->
-                p.x + r > b.rect.left && p.x - r < b.rect.right && p.y + r > b.rect.top && p.y - r < b.rect.bottom
-            } ?: continue
-
-            val toRemove = if (p.isBomb) {
-                blocks.sortedBy { distanceSq(it.rect, hit.rect) }.take(3)
-            } else {
-                listOf(hit)
-            }
-            for (b in toRemove) {
-                blocks.remove(b)
-                score += b.points * (if (hardMode) 2 else 1)
-                addGems(if (b.isGemBlock) 100 else 1)
-                spawnBurst(b.rect.centerX(), b.rect.centerY(), b.color, 10)
-            }
-            updateTopScore()
-            if (p.isBomb) playSound(explosionSoundId)
-            projIt.remove()
-        }
-    }
-
     private fun registerDemoAccount() {
         username = "Player" + (1000 + (Math.random() * 9000).toInt())
         isRegistered = true
@@ -728,61 +636,51 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         } catch (e: Exception) { /* best effort persistence */ }
     }
 
-    private fun handleStorePurchase(index: Int) {
-        if (!isRegistered) {
-            state = GameState.ACCOUNT
+    private val shopThemeProductIds = listOf("theme_soccer", "theme_basketball", "theme_hockey", "theme_space")
+    private val shopThemeIds = listOf("soccer", "basketball", "hockey", "space")
+    private val shopDemoGemCost = 300
+
+    private fun shopThemeOwned(index: Int): Boolean = when (index) {
+        0 -> themeSoccerOwned
+        1 -> themeBasketballOwned
+        2 -> themeHockeyOwned
+        3 -> themeSpaceOwned
+        else -> false
+    }
+
+    private fun handleShopPurchase(index: Int) {
+        if (shopThemeOwned(index)) {
+            activeThemePack = ThemePack.values()[index + 1]
+            pendingAction = PendingAction.RESTART_GAME
             return
         }
-        // Intentionally NOT gated on "already owned": buying again is allowed so the demo
-        // flow can be re-tested freely for every tier, as requested.
         val activity = context as? Activity
-        val price = BillingManager.priceFor(BillingManager.GEM_PACKS[index].productId)
+        val price = BillingManager.priceFor(shopThemeProductIds[index])
         if (price != null && activity != null) {
-            BillingManager.purchase(activity, BillingManager.GEM_PACKS[index].productId)
+            BillingManager.purchase(activity, shopThemeProductIds[index])
             return
         }
-        val cost = intArrayOf(100, 200, 300)[index]
-        if (gems < cost) {
-            storeMessageText = "Not enough gems (need $cost)"
+        // Demo fallback: real Play Billing isn't configured yet (needs Play Console setup), so let
+        // the theme be unlocked with in-game gems for now — keeps the Shop testable in this demo build.
+        if (gems < shopDemoGemCost) {
+            storeMessageText = "Not enough gems (need $shopDemoGemCost)"
             storeMessageTimer = 1.6f
             return
         }
-        addGems(-cost)
-        when (index) {
-            0 -> setCannonLevel(1)
-            1 -> setCannonLevel(2)
-            2 -> {
-                bombsUnlocked = true
-                prefs.edit().putBoolean("bombs_unlocked", true).apply()
-            }
+        gems -= shopDemoGemCost
+        prefs.edit().putInt("gems", gems).apply()
+        unlockTheme(shopThemeIds[index])
+    }
+
+    private fun unlockTheme(themeId: String) {
+        when (themeId) {
+            "soccer" -> { themeSoccerOwned = true; prefs.edit().putBoolean("theme_soccer_owned", true).apply() }
+            "basketball" -> { themeBasketballOwned = true; prefs.edit().putBoolean("theme_basketball_owned", true).apply() }
+            "hockey" -> { themeHockeyOwned = true; prefs.edit().putBoolean("theme_hockey_owned", true).apply() }
+            "space" -> { themeSpaceOwned = true; prefs.edit().putBoolean("theme_space_owned", true).apply() }
         }
         storeMessageText = "Purchased!"
         storeMessageTimer = 1.2f
-    }
-
-    private fun setCannonLevel(level: Int) {
-        if (level > cannonLevel) cannonLevel = level
-        prefs.edit().putInt("cannon_level", cannonLevel).apply()
-    }
-
-    private fun removeAccessory(index: Int) {
-        when (index) {
-            0 -> if (cannonLevel == 1) {
-                cannonLevel = 0
-                prefs.edit().putInt("cannon_level", 0).apply()
-                addGems(100)
-            }
-            1 -> if (cannonLevel >= 2) {
-                cannonLevel = 0
-                prefs.edit().putInt("cannon_level", 0).apply()
-                addGems(200)
-            }
-            2 -> if (bombsUnlocked) {
-                bombsUnlocked = false
-                prefs.edit().putBoolean("bombs_unlocked", false).apply()
-                addGems(300)
-            }
-        }
     }
 
     private fun updateParticles(dt: Float) {
@@ -797,9 +695,173 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         }
     }
 
-    private fun selectBackground(b: BgTheme) {
-        bgTheme = b
-        prefs.edit().putInt("bg_theme", b.ordinal).apply()
+    private fun drawSphereBase(canvas: Canvas, cx: Float, cy: Float, r: Float, base: Int) {
+        paint.style = Paint.Style.FILL
+        paint.shader = RadialGradient(
+            cx - r * 0.35f, cy - r * 0.4f, r * 1.7f,
+            intArrayOf(lighten(base, 0.6f), base, darken(base, 0.3f)),
+            floatArrayOf(0f, 0.55f, 1f),
+            Shader.TileMode.CLAMP
+        )
+        canvas.drawCircle(cx, cy, r, paint)
+        paint.shader = null
+    }
+
+    private fun drawSphereGloss(canvas: Canvas, cx: Float, cy: Float, r: Float) {
+        paint.style = Paint.Style.FILL
+        paint.color = Color.WHITE
+        paint.alpha = 100
+        canvas.drawOval(RectF(cx - r * 0.55f, cy - r * 0.72f, cx - r * 0.05f, cy - r * 0.26f), paint)
+        paint.alpha = 255
+    }
+
+    /** Ball used by a purchased Shop theme (Free ball styles use [drawFreeBallStyle] instead). */
+    private fun drawThemeBall(canvas: Canvas, cx: Float, cy: Float, r: Float, pack: ThemePack) {
+        when (pack) {
+            ThemePack.SOCCER -> {
+                drawSphereBase(canvas, cx, cy, r, Color.WHITE)
+                paint.color = Color.parseColor("#1B1B1B")
+                canvas.drawPath(pentagonPath(cx, cy, r * 0.4f), paint)
+                for (i in 0 until 5) {
+                    val angle = (Math.PI * 2 / 5 * i - Math.PI / 2).toFloat()
+                    val px = cx + r * 0.74f * kotlin.math.cos(angle)
+                    val py = cy + r * 0.74f * kotlin.math.sin(angle)
+                    canvas.drawPath(pentagonPath(px, py, r * 0.23f), paint)
+                }
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = max(1f, r * 0.05f)
+                paint.color = Color.parseColor("#455A64")
+                canvas.drawCircle(cx, cy, r, paint)
+                paint.style = Paint.Style.FILL
+                drawSphereGloss(canvas, cx, cy, r)
+            }
+            ThemePack.BASKETBALL -> {
+                drawSphereBase(canvas, cx, cy, r, Color.parseColor("#E65100"))
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = max(1.1f, r * 0.09f)
+                paint.color = Color.parseColor("#3E1F00")
+                val oval = RectF(cx - r, cy - r, cx + r, cy + r)
+                canvas.drawLine(cx - r, cy, cx + r, cy, paint)
+                canvas.drawLine(cx, cy - r, cx, cy + r, paint)
+                canvas.drawArc(oval, 205f, 130f, false, paint)
+                canvas.drawArc(oval, 25f, 130f, false, paint)
+                paint.style = Paint.Style.FILL
+                drawSphereGloss(canvas, cx, cy, r)
+            }
+            ThemePack.HOCKEY -> {
+                paint.style = Paint.Style.FILL
+                paint.color = Color.parseColor("#111111")
+                canvas.drawOval(RectF(cx - r, cy - r * 0.62f, cx + r, cy + r * 0.62f), paint)
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = max(1f, r * 0.08f)
+                paint.color = Color.parseColor("#424242")
+                canvas.drawOval(RectF(cx - r, cy - r * 0.62f, cx + r, cy + r * 0.62f), paint)
+                paint.style = Paint.Style.FILL
+                paint.color = Color.WHITE
+                paint.alpha = 60
+                canvas.drawOval(RectF(cx - r * 0.5f, cy - r * 0.45f, cx + r * 0.1f, cy - r * 0.15f), paint)
+                paint.alpha = 255
+            }
+            ThemePack.SPACE -> {
+                paint.color = Color.parseColor("#7C4DFF")
+                paint.alpha = 60
+                canvas.drawCircle(cx, cy, r * 1.7f, paint)
+                paint.alpha = 255
+                paint.shader = RadialGradient(
+                    cx - r * 0.3f, cy - r * 0.3f, r * 1.6f,
+                    intArrayOf(Color.parseColor("#E1F5FE"), Color.parseColor("#26C6DA"), Color.parseColor("#4527A0")),
+                    floatArrayOf(0f, 0.5f, 1f),
+                    Shader.TileMode.CLAMP
+                )
+                canvas.drawCircle(cx, cy, r, paint)
+                paint.shader = null
+                drawSphereGloss(canvas, cx, cy, r)
+            }
+            ThemePack.NONE -> {}
+        }
+    }
+
+    /** Free ball style chosen in Options (20 variants over a shared sphere renderer). */
+    private fun drawFreeBallStyle(canvas: Canvas, cx: Float, cy: Float, r: Float, style: BallStyle) {
+        drawSphereBase(canvas, cx, cy, r, style.base)
+        canvas.save()
+        canvas.clipPath(Path().apply { addCircle(cx, cy, r, Path.Direction.CW) })
+        paint.style = Paint.Style.FILL
+        when (style.pattern) {
+            BallPattern.SOLID -> {}
+            BallPattern.STRIPES -> {
+                paint.color = style.accent
+                paint.alpha = 200
+                var sx = cx - r * 1.4f
+                while (sx < cx + r * 1.4f) {
+                    canvas.drawRect(sx, cy - r, sx + r * 0.4f, cy + r, paint)
+                    sx += r * 0.85f
+                }
+                paint.alpha = 255
+            }
+            BallPattern.DOTS -> {
+                paint.color = style.accent
+                for (pt in decorPoints.take(9)) {
+                    val px = cx - r + pt[0] * r * 2f
+                    val py = cy - r + pt[1] * r * 2f
+                    canvas.drawCircle(px, py, r * 0.14f, paint)
+                }
+            }
+            BallPattern.CHECKER -> {
+                paint.color = style.accent
+                val cell = r * 0.7f
+                var gy = cy - r
+                var row = 0
+                while (gy < cy + r) {
+                    var gx = cx - r + if (row % 2 == 0) 0f else cell
+                    while (gx < cx + r) {
+                        canvas.drawRect(gx, gy, gx + cell, gy + cell, paint)
+                        gx += cell * 2f
+                    }
+                    gy += cell
+                    row++
+                }
+            }
+            BallPattern.RING -> {
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = max(1.5f, r * 0.16f)
+                paint.color = style.accent
+                canvas.drawCircle(cx, cy, r * 0.62f, paint)
+                paint.style = Paint.Style.FILL
+            }
+            BallPattern.METALLIC -> {
+                paint.color = Color.WHITE
+                paint.alpha = 70
+                canvas.drawRect(cx - r, cy - r * 0.15f, cx + r, cy + r * 0.05f, paint)
+                paint.alpha = 255
+            }
+        }
+        canvas.restore()
+
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = max(1f, r * 0.07f)
+        paint.color = darken(style.base, 0.4f)
+        paint.alpha = 110
+        canvas.drawCircle(cx, cy, r, paint)
+        paint.alpha = 255
+        paint.style = Paint.Style.FILL
+        drawSphereGloss(canvas, cx, cy, r)
+    }
+
+    private fun drawGameplayBall(canvas: Canvas, cx: Float, cy: Float, r: Float) {
+        if (activeThemePack != ThemePack.NONE) {
+            drawThemeBall(canvas, cx, cy, r, activeThemePack)
+        } else {
+            drawFreeBallStyle(canvas, cx, cy, r, freeBalls[ballIndex.coerceIn(0, freeBalls.size - 1)])
+        }
+    }
+
+    private fun currentBallColor(): Int = when (activeThemePack) {
+        ThemePack.SOCCER -> Color.WHITE
+        ThemePack.BASKETBALL -> Color.parseColor("#E65100")
+        ThemePack.HOCKEY -> Color.parseColor("#111111")
+        ThemePack.SPACE -> Color.parseColor("#26C6DA")
+        ThemePack.NONE -> freeBalls[ballIndex.coerceIn(0, freeBalls.size - 1)].base
     }
 
     private fun updateTopScore() {
@@ -851,21 +913,15 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
                 addGems(grant)
             }
 
-            if (pendingStorePurchase >= 0) {
-                val idx = pendingStorePurchase
-                pendingStorePurchase = -1
-                handleStorePurchase(idx)
+            if (pendingShopPurchase >= 0) {
+                val idx = pendingShopPurchase
+                pendingShopPurchase = -1
+                handleShopPurchase(idx)
             }
 
-            if (pendingBombLaunch) {
-                pendingBombLaunch = false
-                if (bombsUnlocked && bombCooldown <= 0f) launchBomb()
-            }
-
-            if (pendingRemoveAccessory >= 0) {
-                val idx = pendingRemoveAccessory
-                pendingRemoveAccessory = -1
-                removeAccessory(idx)
+            pendingThemeUnlock?.let {
+                pendingThemeUnlock = null
+                unlockTheme(it)
             }
 
             if (pendingRegister) {
@@ -938,27 +994,6 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
             ballDy = newDy
         }
 
-        if (hardMode) {
-            obstacleSpawnTimer -= dt
-            if (obstacleSpawnTimer <= 0f) {
-                spawnObstacle()
-                obstacleSpawnTimer = 1.5f + (Math.random() * 1.5f).toFloat()
-            }
-            updateObstacles(dt)
-            checkObstacleCollisions()
-        }
-
-        if (cannonLevel > 0) {
-            cannonFireTimer -= dt
-            if (cannonFireTimer <= 0f) {
-                fireCannons()
-                cannonFireTimer = cannonInterval
-            }
-        }
-        if (bombCooldown > 0f) bombCooldown -= dt
-        updateProjectiles(dt)
-        checkProjectileCollisions()
-
         // block collisions
         val it = blocks.iterator()
         var bounced = false
@@ -969,7 +1004,7 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
                 ballY + ballR > b.rect.top && ballY - ballR < b.rect.bottom
             ) {
                 it.remove()
-                score += b.points * (if (hardMode) 2 else 1)
+                score += b.points
                 addGems(if (b.isGemBlock) 100 else 1)
                 updateTopScore()
                 val overlapX = min(ballX + ballR - b.rect.left, b.rect.right - (ballX - ballR))
@@ -996,7 +1031,7 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
 
         // ball missed -> explode the ball and lose a life
         if (ballY - ballR > screenH) {
-            spawnBurst(ballX, screenH - dp(30f), ballColor, 22)
+            spawnBurst(ballX, screenH - dp(30f), currentBallColor(), 22)
             lives--
             if (lives <= 0) {
                 onGameOver()
@@ -1020,8 +1055,8 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
             when (state) {
                 GameState.MENU -> drawMenu(canvas)
                 GameState.TOP_SCORE -> drawTopScoreScreen(canvas)
-                GameState.BACKGROUND_SELECT -> drawBackgroundSelectScreen(canvas)
-                GameState.BUY_GEMS -> drawBuyGemsScreen(canvas)
+                GameState.OPTIONS -> drawOptionsScreen(canvas)
+                GameState.SHOP -> drawShopScreen(canvas)
                 GameState.ACCOUNT -> drawAccountScreen(canvas)
                 else -> drawGameplay(canvas)
             }
@@ -1034,46 +1069,45 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
     private fun drawGameplay(canvas: Canvas) {
         drawBackground(canvas)
 
-        // blocks (3D relief: gradient + top highlight + bottom shadow)
+        // blocks (3D relief: gradient + top highlight + bottom shadow; themed games draw little
+        // players/ships instead, tinted by the block's row color so the score bands stay readable)
         for (b in blocks) {
-            paint.shader = LinearGradient(
-                b.rect.left, b.rect.top, b.rect.left, b.rect.bottom,
-                lighten(b.color, 0.35f), darken(b.color, 0.35f), Shader.TileMode.CLAMP
-            )
-            canvas.drawRoundRect(b.rect, dp(4f), dp(4f), paint)
-            paint.shader = null
+            if (activeThemePack != ThemePack.NONE) {
+                drawThemedBlock(canvas, b.rect, b.color, activeThemePack)
+            } else {
+                paint.shader = LinearGradient(
+                    b.rect.left, b.rect.top, b.rect.left, b.rect.bottom,
+                    lighten(b.color, 0.35f), darken(b.color, 0.35f), Shader.TileMode.CLAMP
+                )
+                canvas.drawRoundRect(b.rect, dp(4f), dp(4f), paint)
+                paint.shader = null
 
-            paint.color = Color.WHITE
-            paint.alpha = 80
-            canvas.drawRoundRect(
-                RectF(b.rect.left + dp(2f), b.rect.top + dp(2f), b.rect.right - dp(2f), b.rect.top + (b.rect.height() * 0.4f)),
-                dp(3f), dp(3f), paint
-            )
+                paint.color = Color.WHITE
+                paint.alpha = 80
+                canvas.drawRoundRect(
+                    RectF(b.rect.left + dp(2f), b.rect.top + dp(2f), b.rect.right - dp(2f), b.rect.top + (b.rect.height() * 0.4f)),
+                    dp(3f), dp(3f), paint
+                )
 
-            paint.color = Color.BLACK
-            paint.alpha = 70
-            canvas.drawRect(b.rect.left, b.rect.bottom - dp(3f), b.rect.right, b.rect.bottom, paint)
-            paint.alpha = 255
+                paint.color = Color.BLACK
+                paint.alpha = 70
+                canvas.drawRect(b.rect.left, b.rect.bottom - dp(3f), b.rect.right, b.rect.bottom, paint)
+                paint.alpha = 255
+            }
 
             if (b.isGemBlock) {
                 drawGemIcon(canvas, b.rect.centerX(), b.rect.centerY(), dp(10f))
             }
         }
 
-        if (hardMode) drawObstacles(canvas)
-
         // paddle
         val paddleRect = RectF(paddleX - paddleW / 2f, paddleY, paddleX + paddleW / 2f, paddleY + paddleH)
         drawBeveledButton(canvas, paddleRect, colorSkyBlue)
-        drawCannons(canvas)
-        drawProjectiles(canvas)
 
         // ball (naturally off-screen once missed, so no extra visibility check needed)
-        paint.color = ballColor
-        canvas.drawCircle(ballX, ballY, ballR, paint)
+        drawGameplayBall(canvas, ballX, ballY, ballR)
 
         drawControlZoneHint(canvas)
-        if (bombsUnlocked) drawBombHint(canvas)
         drawTopBar(canvas)
 
         when (state) {
@@ -1127,7 +1161,7 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         canvas.drawPath(trianglePath(cx, cy - lidH, cx + dp(16f), cy - lidH - dp(16f), cx + dp(2f), cy - lidH - dp(2f)), paint)
 
         drawOutlinedText(canvas, "GIFT UNLOCKED!", cx, cy - half - dp(30f), bigPaint)
-        val label = listOf("Cannon", "Double Cannon", "Bombs").getOrElse(activeCrateTier) { "Reward" }
+        val label = "+${crateBonusGems.getOrElse(activeCrateTier) { 0 }} Gems"
         val sub = Paint(buttonTextPaint).apply { textSize = dp(21f) }
         canvas.drawText("You got: $label", cx, cy + half + dp(34f), sub)
         canvas.drawText("Tap to claim", cx, cy + half + dp(60f), sub)
@@ -1143,69 +1177,13 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         paint.alpha = 255
     }
 
-    private fun drawObstacles(canvas: Canvas) {
-        for (o in obstacles) {
-            val facingRight = o.vx > 0
-            when (o.type) {
-                ObstacleType.ROCKET -> drawRocket(canvas, o.x, o.y, facingRight)
-                ObstacleType.PIG -> drawPig(canvas, o.x, o.y, facingRight)
-                ObstacleType.EAGLE -> drawEagle(canvas, o.x, o.y, facingRight)
-                ObstacleType.GOLDFISH -> drawGoldfish(canvas, o.x, o.y, facingRight)
-            }
-        }
-    }
-
-    private fun drawRocket(canvas: Canvas, cx: Float, cy: Float, right: Boolean) {
-        val d = if (right) 1f else -1f
-        val bodyHalf = obstacleHalfW - dp(10f)
-        paint.color = Color.parseColor("#ECEFF1")
-        canvas.drawRoundRect(RectF(cx - bodyHalf, cy - dp(7f), cx + bodyHalf, cy + dp(7f)), dp(6f), dp(6f), paint)
-        paint.color = Color.parseColor("#E53935")
-        canvas.drawPath(trianglePath(cx + bodyHalf * d, cy - dp(7f), cx + bodyHalf * d, cy + dp(7f), cx + (bodyHalf + dp(12f)) * d, cy), paint)
-        paint.color = Color.parseColor("#FFB300")
-        canvas.drawPath(trianglePath(cx - bodyHalf * d, cy - dp(4f), cx - bodyHalf * d, cy + dp(4f), cx - (bodyHalf + dp(10f)) * d, cy), paint)
-    }
-
-    private fun drawPig(canvas: Canvas, cx: Float, cy: Float, right: Boolean) {
-        val d = if (right) 1f else -1f
-        paint.color = Color.WHITE
-        paint.alpha = 200
-        canvas.drawOval(RectF(cx - dp(6f), cy - dp(16f), cx + dp(10f), cy - dp(4f)), paint)
-        paint.alpha = 255
-        paint.color = Color.parseColor("#F48FB1")
-        canvas.drawOval(RectF(cx - dp(18f), cy - dp(11f), cx + dp(18f), cy + dp(11f)), paint)
-        canvas.drawPath(trianglePath(cx - dp(10f) * d, cy - dp(10f), cx - dp(4f) * d, cy - dp(18f), cx + dp(2f) * d, cy - dp(9f)), paint)
-        paint.color = Color.parseColor("#EC7FA5")
-        val snoutCx = cx + dp(10f) * d
-        canvas.drawOval(RectF(snoutCx - dp(6f), cy - dp(5f), snoutCx + dp(6f), cy + dp(5f)), paint)
-    }
-
-    private fun drawEagle(canvas: Canvas, cx: Float, cy: Float, right: Boolean) {
-        val d = if (right) 1f else -1f
-        paint.color = Color.parseColor("#795548")
-        canvas.drawPath(trianglePath(cx - dp(4f) * d, cy, cx - dp(22f) * d, cy - dp(14f), cx - dp(22f) * d, cy + dp(14f)), paint)
-        canvas.drawOval(RectF(cx - dp(12f), cy - dp(7f), cx + dp(12f), cy + dp(7f)), paint)
-        paint.color = Color.parseColor("#FFCA28")
-        val beakCx = cx + dp(14f) * d
-        canvas.drawPath(trianglePath(beakCx - dp(2f) * d, cy - dp(3f), beakCx - dp(2f) * d, cy + dp(3f), beakCx + dp(6f) * d, cy), paint)
-    }
-
-    private fun drawGoldfish(canvas: Canvas, cx: Float, cy: Float, right: Boolean) {
-        val d = if (right) 1f else -1f
-        paint.color = Color.parseColor("#FF7043")
-        canvas.drawOval(RectF(cx - dp(14f), cy - dp(9f), cx + dp(14f), cy + dp(9f)), paint)
-        canvas.drawPath(trianglePath(cx - dp(14f) * d, cy, cx - dp(24f) * d, cy - dp(10f), cx - dp(24f) * d, cy + dp(10f)), paint)
-        paint.color = Color.parseColor("#FFAB91")
-        canvas.drawPath(trianglePath(cx, cy - dp(9f), cx + dp(6f) * d, cy - dp(16f), cx + dp(4f) * d, cy - dp(6f)), paint)
-    }
-
     // --- backgrounds ---
 
     private var decorW = -1
     private var decorH = -1
     private val stars = mutableListOf<FloatArray>() // x, y, radius, alpha
     private val clouds = mutableListOf<FloatArray>() // cx, cy, rw, rh
-    private val diamonds = mutableListOf<DiamondDecor>()
+    private val decorPoints = mutableListOf<FloatArray>() // normalized x, y (0..1), sizeSeed, alphaSeed - shared by generated free backgrounds/balls
 
     private fun ensureDecorGenerated() {
         if (decorW == screenW && decorH == screenH) return
@@ -1234,51 +1212,162 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
                 )
             )
         }
-        diamonds.clear()
-        val diamondColors = intArrayOf(Color.parseColor("#5C6BC0"), Color.parseColor("#26C6DA"), Color.parseColor("#AB47BC"))
-        repeat(18) {
-            diamonds.add(
-                DiamondDecor(
-                    rnd.nextFloat() * screenW,
-                    rnd.nextFloat() * screenH,
-                    dp(20f + rnd.nextFloat() * 40f),
-                    diamondColors[rnd.nextInt(diamondColors.size)]
-                )
-            )
+        decorPoints.clear()
+        repeat(28) {
+            decorPoints.add(floatArrayOf(rnd.nextFloat(), rnd.nextFloat(), rnd.nextFloat(), rnd.nextFloat()))
         }
+    }
+
+    private val freeBackgrounds = listOf(
+        BgStyle("Grid", Color.parseColor("#0B1A33"), Color.parseColor("#0B1A33"), Color.WHITE, DecorShape.GRIDLINES),
+        BgStyle("Night Sky", Color.parseColor("#0D1B4C"), Color.parseColor("#2B3A73"), Color.WHITE, DecorShape.MOON_CLOUDS),
+        BgStyle("Diamonds", Color.BLACK, Color.BLACK, Color.parseColor("#5C6BC0"), DecorShape.DIAMONDS),
+        BgStyle("Sunset", Color.parseColor("#FF7043"), Color.parseColor("#4A148C"), Color.parseColor("#FFD54F"), DecorShape.DOTS),
+        BgStyle("Ocean", Color.parseColor("#01579B"), Color.parseColor("#00838F"), Color.parseColor("#80DEEA"), DecorShape.RINGS),
+        BgStyle("Forest", Color.parseColor("#1B5E20"), Color.parseColor("#33691E"), Color.parseColor("#AED581"), DecorShape.TRIANGLES),
+        BgStyle("Candy", Color.parseColor("#F48FB1"), Color.parseColor("#CE93D8"), Color.WHITE, DecorShape.DOTS),
+        BgStyle("Lava", Color.parseColor("#3E2723"), Color.parseColor("#BF360C"), Color.parseColor("#FFAB40"), DecorShape.TRIANGLES),
+        BgStyle("Aurora", Color.parseColor("#0D1B2A"), Color.parseColor("#1B4332"), Color.parseColor("#64FFDA"), DecorShape.STRIPES),
+        BgStyle("Synthwave", Color.parseColor("#2B0B3F"), Color.parseColor("#7A0C4B"), Color.parseColor("#00E5FF"), DecorShape.GRIDLINES),
+        BgStyle("Bubblegum", Color.parseColor("#F8BBD0"), Color.parseColor("#F48FB1"), Color.WHITE, DecorShape.RINGS),
+        BgStyle("Desert", Color.parseColor("#FFD54F"), Color.parseColor("#EF6C00"), Color.parseColor("#FFF3E0"), DecorShape.DOTS),
+        BgStyle("Coral", Color.parseColor("#00695C"), Color.parseColor("#26A69A"), Color.parseColor("#FF8A65"), DecorShape.RINGS),
+        BgStyle("Mint", Color.parseColor("#004D40"), Color.parseColor("#00796B"), Color.parseColor("#B2FF59"), DecorShape.TRIANGLES),
+        BgStyle("Berry", Color.parseColor("#4A148C"), Color.parseColor("#880E4F"), Color.parseColor("#F06292"), DecorShape.DOTS),
+        BgStyle("Citrus", Color.parseColor("#F9A825"), Color.parseColor("#FBC02D"), Color.parseColor("#33691E"), DecorShape.STRIPES),
+        BgStyle("Slate Tech", Color.parseColor("#101820"), Color.parseColor("#1C2833"), Color.parseColor("#00E5FF"), DecorShape.GRIDLINES),
+        BgStyle("Rain", Color.parseColor("#37474F"), Color.parseColor("#263238"), Color.parseColor("#90A4AE"), DecorShape.STRIPES),
+        BgStyle("Confetti", Color.parseColor("#212121"), Color.parseColor("#424242"), Color.parseColor("#FF4081"), DecorShape.DOTS),
+        BgStyle("Golden Hour", Color.parseColor("#FFB300"), Color.parseColor("#6A1B9A"), Color.parseColor("#FFF176"), DecorShape.RINGS)
+    )
+
+    private val freeBalls = listOf(
+        BallStyle("Yellow", Color.parseColor("#FFEB3B"), Color.parseColor("#FBC02D"), BallPattern.SOLID),
+        BallStyle("White", Color.WHITE, Color.parseColor("#B0BEC5"), BallPattern.SOLID),
+        BallStyle("Red", Color.parseColor("#E53935"), Color.parseColor("#FFCDD2"), BallPattern.SOLID),
+        BallStyle("Blue", Color.parseColor("#1E88E5"), Color.parseColor("#BBDEFB"), BallPattern.SOLID),
+        BallStyle("Green", Color.parseColor("#43A047"), Color.parseColor("#C8E6C9"), BallPattern.SOLID),
+        BallStyle("Purple", Color.parseColor("#8E24AA"), Color.parseColor("#E1BEE7"), BallPattern.SOLID),
+        BallStyle("Orange", Color.parseColor("#FB8C00"), Color.parseColor("#FFE0B2"), BallPattern.SOLID),
+        BallStyle("Pink", Color.parseColor("#EC407A"), Color.parseColor("#F8BBD0"), BallPattern.SOLID),
+        BallStyle("Teal", Color.parseColor("#00897B"), Color.parseColor("#B2DFDB"), BallPattern.SOLID),
+        BallStyle("Lime", Color.parseColor("#C0CA33"), Color.parseColor("#F0F4C3"), BallPattern.SOLID),
+        BallStyle("Cyan Ring", Color.parseColor("#00BCD4"), Color.WHITE, BallPattern.RING),
+        BallStyle("Magenta Ring", Color.parseColor("#D81B60"), Color.WHITE, BallPattern.RING),
+        BallStyle("Candy Stripes", Color.parseColor("#E53935"), Color.WHITE, BallPattern.STRIPES),
+        BallStyle("Blueberry Stripes", Color.parseColor("#1565C0"), Color.WHITE, BallPattern.STRIPES),
+        BallStyle("Checker", Color.parseColor("#212121"), Color.WHITE, BallPattern.CHECKER),
+        BallStyle("Grape Stripes", Color.parseColor("#5E35B1"), Color.parseColor("#FFEB3B"), BallPattern.STRIPES),
+        BallStyle("Gold", Color.parseColor("#FFC107"), Color.parseColor("#FFF8E1"), BallPattern.METALLIC),
+        BallStyle("Silver", Color.parseColor("#B0BEC5"), Color.parseColor("#ECEFF1"), BallPattern.METALLIC),
+        BallStyle("Neon Glow", Color.parseColor("#00E676"), Color.WHITE, BallPattern.RING),
+        BallStyle("Polka Dot", Color.parseColor("#FF80AB"), Color.WHITE, BallPattern.DOTS)
+    )
+
+    private fun selectBackground(index: Int) {
+        bgIndex = index
+        prefs.edit().putInt("bg_index", index).apply()
+    }
+
+    private fun selectBallSkin(index: Int) {
+        ballIndex = index
+        prefs.edit().putInt("ball_index", index).apply()
     }
 
     private fun drawBackground(canvas: Canvas) {
         ensureDecorGenerated()
-        when (bgTheme) {
-            BgTheme.GRID -> drawGridBackground(canvas)
-            BgTheme.SPACE -> drawSpaceBackground(canvas)
-            BgTheme.SKY -> drawSkyBackground(canvas)
-            BgTheme.DIAMONDS -> drawDiamondsBackground(canvas)
+        if (activeThemePack != ThemePack.NONE) {
+            drawThemeBackground(canvas, activeThemePack)
+        } else {
+            drawFreeBackground(canvas, freeBackgrounds[bgIndex.coerceIn(0, freeBackgrounds.size - 1)])
         }
     }
 
-    private fun drawGridBackground(canvas: Canvas) {
-        canvas.drawColor(Color.parseColor("#0B1A33"))
-        paint.color = Color.WHITE
-        paint.alpha = 18
-        paint.strokeWidth = dp(1f)
-        val step = dp(40f)
-        var x = 0f
-        while (x < screenW) { canvas.drawLine(x, 0f, x, screenH.toFloat(), paint); x += step }
-        var y = 0f
-        while (y < screenH) { canvas.drawLine(0f, y, screenW.toFloat(), y, paint); y += step }
-        paint.alpha = 255
-    }
-
-    private fun drawSpaceBackground(canvas: Canvas) {
-        canvas.drawColor(Color.parseColor("#0B1A33"))
-        paint.color = Color.WHITE
-        for (s in stars) {
-            paint.alpha = s[3].toInt()
-            canvas.drawCircle(s[0], s[1], s[2], paint)
+    private fun drawFreeBackground(
+        canvas: Canvas,
+        style: BgStyle,
+        area: RectF = RectF(0f, 0f, screenW.toFloat(), screenH.toFloat())
+    ) {
+        when (style.shape) {
+            DecorShape.GRIDLINES -> {
+                paint.color = style.top
+                canvas.drawRect(area, paint)
+                paint.color = style.accent
+                paint.alpha = 26
+                paint.strokeWidth = dp(1f)
+                val step = min(area.width(), area.height()) / 7f
+                var x = area.left
+                while (x < area.right) { canvas.drawLine(x, area.top, x, area.bottom, paint); x += step }
+                var y = area.top
+                while (y < area.bottom) { canvas.drawLine(area.left, y, area.right, y, paint); y += step }
+                paint.alpha = 255
+            }
+            DecorShape.MOON_CLOUDS -> drawSkyBackground(canvas)
+            else -> {
+                if (style.top == style.bottom) {
+                    paint.color = style.top
+                    canvas.drawRect(area, paint)
+                } else {
+                    paint.shader = LinearGradient(
+                        area.left, area.top, area.left, area.bottom, style.top, style.bottom, Shader.TileMode.CLAMP
+                    )
+                    canvas.drawRect(area, paint)
+                    paint.shader = null
+                }
+                paint.color = style.accent
+                val n = style.density.coerceAtMost(decorPoints.size)
+                val unit = min(area.width(), area.height())
+                when (style.shape) {
+                    DecorShape.DOTS -> for (i in 0 until n) {
+                        val pt = decorPoints[i]
+                        paint.alpha = (40 + pt[3] * 70).toInt()
+                        canvas.drawCircle(area.left + pt[0] * area.width(), area.top + pt[1] * area.height(), unit * (0.02f + pt[2] * 0.05f), paint)
+                    }
+                    DecorShape.RINGS -> {
+                        paint.style = Paint.Style.STROKE
+                        paint.strokeWidth = max(1f, unit * 0.012f)
+                        for (i in 0 until n) {
+                            val pt = decorPoints[i]
+                            paint.alpha = (30 + pt[3] * 60).toInt()
+                            canvas.drawCircle(area.left + pt[0] * area.width(), area.top + pt[1] * area.height(), unit * (0.05f + pt[2] * 0.14f), paint)
+                        }
+                        paint.style = Paint.Style.FILL
+                    }
+                    DecorShape.TRIANGLES -> for (i in 0 until n) {
+                        val pt = decorPoints[i]
+                        paint.alpha = (30 + pt[3] * 60).toInt()
+                        val cx = area.left + pt[0] * area.width()
+                        val cy = area.top + pt[1] * area.height()
+                        val s = unit * (0.06f + pt[2] * 0.12f)
+                        canvas.drawPath(trianglePath(cx, cy - s, cx + s, cy + s, cx - s, cy + s), paint)
+                    }
+                    DecorShape.DIAMONDS -> for (i in 0 until n) {
+                        val pt = decorPoints[i]
+                        paint.alpha = (30 + pt[3] * 60).toInt()
+                        val cx = area.left + pt[0] * area.width()
+                        val cy = area.top + pt[1] * area.height()
+                        val s = unit * (0.05f + pt[2] * 0.14f)
+                        canvas.drawPath(diamondPath(cx, cy, s), paint)
+                    }
+                    DecorShape.STRIPES -> {
+                        canvas.save()
+                        canvas.clipRect(area)
+                        paint.alpha = 30
+                        val stripeW = unit * 0.18f
+                        canvas.rotate(-20f, area.centerX(), area.centerY())
+                        val diag = area.width() + area.height()
+                        var sx = area.centerX() - diag
+                        while (sx < area.centerX() + diag) {
+                            canvas.drawRect(sx, area.centerY() - diag, sx + stripeW, area.centerY() + diag, paint)
+                            sx += stripeW * 2.4f
+                        }
+                        canvas.restore()
+                    }
+                    else -> {}
+                }
+                paint.alpha = 255
+            }
         }
-        paint.alpha = 255
     }
 
     private fun drawSkyBackground(canvas: Canvas) {
@@ -1313,37 +1402,153 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         paint.alpha = 255
     }
 
-    private fun drawDiamondsBackground(canvas: Canvas) {
-        canvas.drawColor(Color.BLACK)
-        for (d in diamonds) {
-            paint.color = d.color
-            paint.alpha = 30
-            canvas.drawPath(diamondPath(d.x, d.y, d.r), paint)
+    private fun drawSpaceBackground(canvas: Canvas) {
+        canvas.drawColor(Color.parseColor("#0B1A33"))
+        paint.color = Color.WHITE
+        for (s in stars) {
+            paint.alpha = s[3].toInt()
+            canvas.drawCircle(s[0], s[1], s[2], paint)
         }
         paint.alpha = 255
+
+        // premium touch: a distant glowing planet so the paid Space theme reads as special
+        paint.shader = RadialGradient(
+            screenW * 0.78f, screenH * 0.16f, dp(46f),
+            Color.parseColor("#B39DDB"), Color.parseColor("#4527A0"), Shader.TileMode.CLAMP
+        )
+        canvas.drawCircle(screenW * 0.78f, screenH * 0.16f, dp(34f), paint)
+        paint.shader = null
+    }
+
+    private fun drawThemeBackground(canvas: Canvas, pack: ThemePack) {
+        when (pack) {
+            ThemePack.SOCCER -> drawSoccerFieldBackground(canvas)
+            ThemePack.BASKETBALL -> drawBasketballCourtBackground(canvas)
+            ThemePack.HOCKEY -> drawHockeyRinkBackground(canvas)
+            ThemePack.SPACE -> drawSpaceBackground(canvas)
+            ThemePack.NONE -> {}
+        }
+    }
+
+    private fun drawSoccerFieldBackground(canvas: Canvas) {
+        paint.shader = LinearGradient(
+            0f, 0f, 0f, screenH.toFloat(),
+            Color.parseColor("#2E7D32"), Color.parseColor("#1B5E20"), Shader.TileMode.CLAMP
+        )
+        canvas.drawRect(0f, 0f, screenW.toFloat(), screenH.toFloat(), paint)
+        paint.shader = null
+
+        // mowed-grass stripes
+        paint.color = Color.WHITE
+        paint.alpha = 12
+        val stripeH = screenH / 10f
+        for (i in 0 until 10 step 2) canvas.drawRect(0f, i * stripeH, screenW.toFloat(), (i + 1) * stripeH, paint)
+        paint.alpha = 255
+
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = dp(2.5f)
+        paint.color = Color.WHITE
+        paint.alpha = 200
+        val margin = dp(14f)
+        canvas.drawRect(margin, margin, screenW - margin, screenH - margin, paint)
+        canvas.drawLine(margin, screenH / 2f, screenW - margin, screenH / 2f, paint)
+        canvas.drawCircle(screenW / 2f, screenH / 2f, dp(46f), paint)
+        val boxW = screenW * 0.5f
+        canvas.drawRect((screenW - boxW) / 2f, margin, (screenW + boxW) / 2f, margin + dp(60f), paint)
+        canvas.drawRect((screenW - boxW) / 2f, screenH - margin - dp(60f), (screenW + boxW) / 2f, screenH - margin, paint)
+        paint.alpha = 255
+        paint.style = Paint.Style.FILL
+    }
+
+    private fun drawBasketballCourtBackground(canvas: Canvas) {
+        paint.shader = LinearGradient(
+            0f, 0f, 0f, screenH.toFloat(),
+            Color.parseColor("#C87F3E"), Color.parseColor("#A0602A"), Shader.TileMode.CLAMP
+        )
+        canvas.drawRect(0f, 0f, screenW.toFloat(), screenH.toFloat(), paint)
+        paint.shader = null
+
+        // plank lines for a wood-court feel
+        paint.color = Color.BLACK
+        paint.alpha = 18
+        paint.strokeWidth = dp(1f)
+        var x = 0f
+        while (x < screenW) { canvas.drawLine(x, 0f, x, screenH.toFloat(), paint); x += dp(18f) }
+        paint.alpha = 255
+
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = dp(2.5f)
+        paint.color = Color.WHITE
+        paint.alpha = 210
+        val margin = dp(14f)
+        canvas.drawRect(margin, margin, screenW - margin, screenH - margin, paint)
+        canvas.drawLine(margin, screenH / 2f, screenW - margin, screenH / 2f, paint)
+        canvas.drawCircle(screenW / 2f, screenH / 2f, dp(40f), paint)
+        val keyW = screenW * 0.4f
+        canvas.drawRect((screenW - keyW) / 2f, margin, (screenW + keyW) / 2f, margin + dp(90f), paint)
+        canvas.drawRect((screenW - keyW) / 2f, screenH - margin - dp(90f), (screenW + keyW) / 2f, screenH - margin, paint)
+        canvas.drawArc(RectF(screenW / 2f - dp(70f), margin - dp(70f), screenW / 2f + dp(70f), margin + dp(70f)), 0f, 180f, false, paint)
+        canvas.drawArc(RectF(screenW / 2f - dp(70f), screenH - margin - dp(70f), screenW / 2f + dp(70f), screenH - margin + dp(70f)), 180f, 180f, false, paint)
+        paint.alpha = 255
+        paint.style = Paint.Style.FILL
+    }
+
+    private fun drawHockeyRinkBackground(canvas: Canvas) {
+        paint.shader = LinearGradient(
+            0f, 0f, 0f, screenH.toFloat(),
+            Color.parseColor("#E1F5FE"), Color.parseColor("#B3E5FC"), Shader.TileMode.CLAMP
+        )
+        canvas.drawRect(0f, 0f, screenW.toFloat(), screenH.toFloat(), paint)
+        paint.shader = null
+
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = dp(3f)
+        paint.color = Color.parseColor("#C62828")
+        val margin = dp(14f)
+        canvas.drawRoundRect(RectF(margin, margin, screenW - margin, screenH - margin), dp(30f), dp(30f), paint)
+
+        paint.strokeWidth = dp(4f)
+        canvas.drawLine(margin, screenH / 2f, screenW - margin, screenH / 2f, paint)
+
+        paint.color = Color.parseColor("#1565C0")
+        canvas.drawLine(margin, screenH * 0.28f, screenW - margin, screenH * 0.28f, paint)
+        canvas.drawLine(margin, screenH * 0.72f, screenW - margin, screenH * 0.72f, paint)
+
+        paint.color = Color.parseColor("#C62828")
+        paint.strokeWidth = dp(2f)
+        canvas.drawCircle(screenW / 2f, screenH / 2f, dp(36f), paint)
+        canvas.drawCircle(screenW * 0.28f, screenH * 0.18f, dp(26f), paint)
+        canvas.drawCircle(screenW * 0.72f, screenH * 0.18f, dp(26f), paint)
+        canvas.drawCircle(screenW * 0.28f, screenH * 0.82f, dp(26f), paint)
+        canvas.drawCircle(screenW * 0.72f, screenH * 0.82f, dp(26f), paint)
+        paint.style = Paint.Style.FILL
     }
 
     // --- HUD ---
 
-    private fun exitButtonRect(): RectF = RectF(dp(6f), dp(6f), dp(52f), dp(52f))
+    private fun exitButtonRect(): RectF {
+        val d = dp(36f)
+        val cx = screenW / 2f
+        return RectF(cx - d / 2f, dp(6f), cx + d / 2f, dp(6f) + d)
+    }
 
     private fun drawExitButton(canvas: Canvas) {
         val r = exitButtonRect()
         val cx = r.centerX()
         val cy = r.centerY()
-        val radius = r.width() / 2f
+        val half = r.width() / 2f
 
         paint.color = Color.parseColor("#76FF03") // acid green
-        canvas.drawCircle(cx, cy, radius, paint)
+        canvas.drawRoundRect(r, dp(6f), dp(6f), paint)
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = dp(2f)
         paint.color = Color.parseColor("#33691E")
-        canvas.drawCircle(cx, cy, radius, paint)
+        canvas.drawRoundRect(r, dp(6f), dp(6f), paint)
         paint.style = Paint.Style.FILL
 
         paint.color = Color.WHITE
-        paint.strokeWidth = dp(4f)
-        val armLen = radius * 0.5f
+        paint.strokeWidth = dp(3f)
+        val armLen = half * 0.45f
         canvas.drawLine(cx - armLen, cy - armLen, cx + armLen, cy + armLen, paint)
         canvas.drawLine(cx + armLen, cy - armLen, cx - armLen, cy + armLen, paint)
     }
@@ -1358,7 +1563,7 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
 
         // score is the primary stat: bigger + outlined so it stands out
         val scorePaint = Paint(hudPaint).apply { textAlign = Paint.Align.LEFT; color = colorGold; textSize = dp(30f) }
-        drawOutlinedText(canvas, "Score: $score", dp(62f), dp(32f), scorePaint)
+        drawOutlinedText(canvas, "Score: $score", dp(16f), dp(32f), scorePaint)
 
         hudPaint.textAlign = Paint.Align.RIGHT
         hudPaint.color = colorLeafGreen
@@ -1379,64 +1584,6 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
             screenW / 2f, dp(58f), levelPaint
         )
 
-        if (hardMode) {
-            val hardPaint = Paint(hudPaint).apply {
-                textAlign = Paint.Align.RIGHT
-                color = Color.parseColor("#FF5252")
-                textSize = dp(20f)
-            }
-            canvas.drawText("HARD", screenW - dp(16f), dp(58f), hardPaint)
-        }
-    }
-
-    private fun drawCannons(canvas: Canvas) {
-        if (cannonLevel <= 0) return
-        paint.color = Color.parseColor("#546E7A")
-        val positions = if (cannonLevel == 1) {
-            listOf(paddleX)
-        } else {
-            listOf(paddleX - paddleW / 2f + dp(8f), paddleX + paddleW / 2f - dp(8f))
-        }
-        for (px in positions) {
-            canvas.drawRoundRect(RectF(px - dp(5f), paddleY - dp(14f), px + dp(5f), paddleY + dp(2f)), dp(3f), dp(3f), paint)
-        }
-    }
-
-    private fun drawProjectiles(canvas: Canvas) {
-        for (p in projectiles) {
-            if (p.isBomb) {
-                // dark bomb body with a bright outline so it reads clearly on any background
-                paint.color = Color.parseColor("#212121")
-                canvas.drawCircle(p.x, p.y, dp(11f), paint)
-                paint.style = Paint.Style.STROKE
-                paint.strokeWidth = dp(2.5f)
-                paint.color = Color.WHITE
-                canvas.drawCircle(p.x, p.y, dp(11f), paint)
-                paint.style = Paint.Style.FILL
-
-                paint.color = Color.WHITE
-                paint.alpha = 130
-                canvas.drawCircle(p.x - dp(3.5f), p.y - dp(3.5f), dp(3.5f), paint)
-                paint.alpha = 255
-
-                // lit fuse
-                paint.color = Color.parseColor("#8D6E63")
-                canvas.drawRect(p.x - dp(1.5f), p.y - dp(18f), p.x + dp(1.5f), p.y - dp(10f), paint)
-                paint.color = Color.parseColor("#FF7043")
-                canvas.drawCircle(p.x, p.y - dp(19f), dp(5f), paint)
-                paint.color = Color.parseColor("#FFEE58")
-                canvas.drawCircle(p.x, p.y - dp(19f), dp(2.5f), paint)
-            } else {
-                paint.color = Color.parseColor("#80DEEA")
-                canvas.drawRoundRect(RectF(p.x - dp(2.5f), p.y - dp(8f), p.x + dp(2.5f), p.y + dp(8f)), dp(2f), dp(2f), paint)
-            }
-        }
-    }
-
-    private fun drawBombHint(canvas: Canvas) {
-        val label = if (bombCooldown <= 0f) "Bomb ready – tap center" else "Bomb: ${(bombCooldown).toInt() + 1}s"
-        val bombPaint = Paint(levelPaint).apply { textSize = dp(15f) }
-        canvas.drawText(label, screenW / 2f, screenH - bottomBarH - controlZoneH - dp(10f), bombPaint)
     }
 
     private fun drawGemsBadge(canvas: Canvas) {
@@ -1482,19 +1629,19 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         val gap = dp(10f)
         val left = (screenW - bw) / 2f
         val startY = screenH * 0.27f
-        return (0 until 6).map { i ->
+        return (0 until 5).map { i ->
             val top = startY + i * (bh + gap)
             RectF(left, top, left + bw, top + bh)
         }
     }
 
-    private fun gemPackRects(): List<RectF> {
+    private fun shopCardRects(): List<RectF> {
         val w = screenW * 0.8f
         val h = dp(90f)
-        val gap = dp(20f)
+        val gap = dp(16f)
         val left = (screenW - w) / 2f
-        val startY = screenH * 0.28f
-        return (0 until 3).map { i ->
+        val startY = screenH * 0.2f
+        return (0 until 4).map { i ->
             val top = startY + i * (h + gap)
             RectF(left, top, left + w, top + h)
         }
@@ -1506,16 +1653,48 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         return RectF(dp(20f), screenH - dp(30f) - h, dp(20f) + w, screenH - dp(30f))
     }
 
-    private fun bgOptionRects(): List<RectF> {
-        val w = screenW * 0.8f
-        val h = dp(90f)
-        val gap = dp(14f)
-        val left = (screenW - w) / 2f
-        val startY = screenH * 0.16f
-        return (0 until 4).map { i ->
-            val top = startY + i * (h + gap)
-            RectF(left, top, left + w, top + h)
+    private fun optionsHeaderBottom(): Float = screenH * 0.08f + dp(50f)
+
+    private fun optionsTabTop(): Float = optionsHeaderBottom() + dp(10f)
+
+    private val optionsTabH = dp(34f)
+
+    private fun optionsNameY(): Float = optionsTabTop() + optionsTabH + dp(22f)
+
+    private fun optionsGridTop(): Float = optionsNameY() + dp(12f)
+
+    private fun optionsTabRects(): List<RectF> {
+        val w = dp(140f)
+        val h = optionsTabH
+        val gap = dp(10f)
+        val totalW = w * 2 + gap
+        val left = (screenW - totalW) / 2f
+        val top = optionsTabTop()
+        return listOf(
+            RectF(left, top, left + w, top + h),
+            RectF(left + w + gap, top, left + w + gap + w, top + h)
+        )
+    }
+
+    private fun optionsGridRects(): List<RectF> {
+        val cols = 4
+        val rows = 5
+        val totalW = screenW * 0.86f
+        val gapX = dp(8f)
+        val gapY = dp(10f)
+        val cellW = (totalW - gapX * (cols - 1)) / cols
+        val cellH = cellW * 0.82f
+        val left = (screenW - totalW) / 2f
+        val top = optionsGridTop()
+        val list = mutableListOf<RectF>()
+        for (row in 0 until rows) {
+            for (col in 0 until cols) {
+                val l = left + col * (cellW + gapX)
+                val t = top + row * (cellH + gapY)
+                list.add(RectF(l, t, l + cellW, t + cellH))
+            }
         }
+        return list
     }
 
     private fun drawMenu(canvas: Canvas) {
@@ -1528,9 +1707,9 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         drawOutlinedText(canvas, "SUPER PONG", screenW / 2f, screenH * 0.14f + dp(40f), titlePaint)
 
         val rects = menuButtonRects()
-        val labels = listOf("New Game Normal", "New Game Hard", "Top Score", "Change Background", "Store", "My Account")
+        val labels = listOf("New Game Normal", "Top Score", "Options", "Shop", "My Account")
         val buttonColors = listOf(
-            colorSkyBlue, Color.parseColor("#EF5350"), colorGold, colorLeafGreen,
+            colorSkyBlue, colorGold, colorLeafGreen,
             Color.parseColor("#AB47BC"), Color.parseColor("#546E7A")
         )
         val labelPaint = Paint(buttonTextPaint).apply { textSize = dp(20f) }
@@ -1606,45 +1785,54 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         canvas.drawText("© $year IstoreLab", screenW / 2f, screenH - dp(16f), p)
     }
 
-    private fun drawBuyGemsScreen(canvas: Canvas) {
-        drawBackground(canvas)
+    private fun drawShopScreen(canvas: Canvas) {
+        canvas.drawColor(Color.parseColor("#0B1A33"))
 
         paint.color = Color.BLACK
         paint.alpha = 70
         canvas.drawRect(0f, screenH * 0.08f, screenW.toFloat(), screenH * 0.08f + dp(50f), paint)
         paint.alpha = 255
         drawOutlinedText(
-            canvas, "STORE", screenW / 2f, screenH * 0.08f + dp(36f),
+            canvas, "SHOP", screenW / 2f, screenH * 0.08f + dp(36f),
             Paint(titlePaint).apply { textSize = dp(28f) }
         )
+        val subPaint = Paint(levelPaint).apply { textSize = dp(13f) }
+        canvas.drawText("Full theme packs: field, ball & players", screenW / 2f, screenH * 0.08f + dp(64f), subPaint)
 
-        if (!isRegistered) {
-            val warn = Paint(levelPaint).apply { color = Color.parseColor("#FF5252"); textSize = dp(15f) }
-            canvas.drawText("Register in My Account to make purchases", screenW / 2f, screenH * 0.08f + dp(66f), warn)
-        }
-
-        val rects = gemPackRects()
-        val titles = listOf("Cannon", "Double Cannon", "Bombs")
-        val descriptions = listOf("Auto-fires upward", "Two side cannons", "Tap center every 5s: destroys 3 blocks")
-        val gemCosts = intArrayOf(100, 200, 300)
-        val euroPrices = listOf("€1", "€2", "€3")
-        val owned = booleanArrayOf(cannonLevel >= 1, cannonLevel >= 2, bombsUnlocked)
+        val rects = shopCardRects()
+        val names = listOf("Soccer", "Basketball", "Hockey", "Space")
+        val owned = booleanArrayOf(themeSoccerOwned, themeBasketballOwned, themeHockeyOwned, themeSpaceOwned)
 
         for (i in rects.indices) {
-            drawBeveledButton(canvas, rects[i], if (owned[i]) colorLeafGreen else Color.parseColor("#AB47BC"))
-            drawOutlinedText(canvas, titles[i], rects[i].centerX(), rects[i].top + dp(30f), buttonTextPaint)
-            val descPaint = Paint(buttonTextPaint).apply { textSize = dp(15f) }
-            canvas.drawText(descriptions[i], rects[i].centerX(), rects[i].top + dp(52f), descPaint)
+            val r = rects[i]
+            canvas.save()
+            canvas.clipRect(r)
+            drawThemeBackground(canvas, ThemePack.values()[i + 1])
+            canvas.restore()
+
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = dp(3f)
+            paint.color = if (owned[i]) Color.parseColor("#76FF03") else Color.WHITE
+            paint.alpha = if (owned[i]) 255 else 110
+            canvas.drawRoundRect(r, dp(10f), dp(10f), paint)
+            paint.style = Paint.Style.FILL
+            paint.alpha = 255
+
+            drawThemeBall(canvas, r.left + dp(28f), r.centerY(), dp(16f), ThemePack.values()[i + 1])
+
+            paint.color = Color.BLACK
+            paint.alpha = 130
+            canvas.drawRect(r.left + dp(48f), r.top, r.right, r.bottom, paint)
+            paint.alpha = 255
+            drawOutlinedText(canvas, names[i], (r.left + dp(48f) + r.right) / 2f, r.top + dp(30f), buttonTextPaint)
 
             val priceLabel = if (owned[i]) {
-                "Owned · tap to buy again"
+                "Owned · tap to play"
             } else {
-                val realPrice = BillingManager.priceFor(BillingManager.GEM_PACKS[i].productId)
-                if (realPrice != null) "$realPrice  ·  or ${gemCosts[i]} gems (demo)"
-                else "${gemCosts[i]} gems · ${euroPrices[i]} (tap: unlock with your gems)"
+                BillingManager.priceFor(shopThemeProductIds[i]) ?: "$shopDemoGemCost gems (demo)"
             }
-            val pricePaint = Paint(buttonTextPaint).apply { textSize = dp(15f) }
-            drawOutlinedText(canvas, priceLabel, rects[i].centerX(), rects[i].bottom - dp(12f), pricePaint)
+            val pricePaint = Paint(buttonTextPaint).apply { textSize = dp(16f) }
+            drawOutlinedText(canvas, priceLabel, (r.left + dp(48f) + r.right) / 2f, r.bottom - dp(14f), pricePaint)
         }
 
         if (storeMessageTimer > 0f) {
@@ -1673,7 +1861,7 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         drawBackButton(canvas)
     }
 
-    private fun drawBackgroundSelectScreen(canvas: Canvas) {
+    private fun drawOptionsScreen(canvas: Canvas) {
         canvas.drawColor(Color.parseColor("#0B1A33"))
         drawGemsBadge(canvas)
 
@@ -1682,38 +1870,65 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         canvas.drawRect(0f, screenH * 0.08f, screenW.toFloat(), screenH * 0.08f + dp(50f), paint)
         paint.alpha = 255
         drawOutlinedText(
-            canvas, "CHOOSE BACKGROUND", screenW / 2f, screenH * 0.08f + dp(36f),
+            canvas, "OPTIONS", screenW / 2f, screenH * 0.08f + dp(36f),
             Paint(titlePaint).apply { textSize = dp(26f) }
         )
 
-        val rects = bgOptionRects()
-        val names = listOf("Grid", "Space", "Night Sky", "Diamonds")
-        val options = BgTheme.values()
-        for (i in rects.indices) {
-            canvas.save()
-            canvas.clipRect(rects[i])
-            when (options[i]) {
-                BgTheme.GRID -> drawGridBackground(canvas)
-                BgTheme.SPACE -> drawSpaceBackground(canvas)
-                BgTheme.SKY -> drawSkyBackground(canvas)
-                BgTheme.DIAMONDS -> drawDiamondsBackground(canvas)
+        val tabRects = optionsTabRects()
+        val tabLabels = listOf("Background", "Ball")
+        for (i in tabRects.indices) {
+            val active = optionsTab == i
+            drawBeveledButton(canvas, tabRects[i], if (active) colorLeafGreen else Color.parseColor("#546E7A"))
+            drawOutlinedText(
+                canvas, tabLabels[i], tabRects[i].centerX(), tabRects[i].centerY() + dp(6f),
+                Paint(buttonTextPaint).apply { textSize = dp(16f) }
+            )
+        }
+
+        val selectedName = if (optionsTab == 0) {
+            freeBackgrounds[bgIndex.coerceIn(0, freeBackgrounds.size - 1)].name
+        } else {
+            freeBalls[ballIndex.coerceIn(0, freeBalls.size - 1)].name
+        }
+        val namePaint = Paint(levelPaint).apply { textSize = dp(15f); color = colorGold }
+        canvas.drawText(selectedName, screenW / 2f, optionsNameY(), namePaint)
+
+        val cellRects = optionsGridRects()
+        if (optionsTab == 0) {
+            for (i in cellRects.indices) {
+                if (i >= freeBackgrounds.size) break
+                val r = cellRects[i]
+                canvas.save()
+                canvas.clipRect(r)
+                drawFreeBackground(canvas, freeBackgrounds[i], r)
+                canvas.restore()
+
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = dp(2.5f)
+                val selected = bgIndex == i
+                paint.color = if (selected) Color.parseColor("#FFEB3B") else Color.WHITE
+                paint.alpha = if (selected) 255 else 80
+                canvas.drawRoundRect(r, dp(6f), dp(6f), paint)
+                paint.style = Paint.Style.FILL
+                paint.alpha = 255
             }
-            canvas.restore()
+        } else {
+            for (i in cellRects.indices) {
+                if (i >= freeBalls.size) break
+                val r = cellRects[i]
+                paint.color = Color.parseColor("#13294F")
+                canvas.drawRoundRect(r, dp(6f), dp(6f), paint)
+                drawFreeBallStyle(canvas, r.centerX(), r.centerY(), min(r.width(), r.height()) * 0.36f, freeBalls[i])
 
-            paint.style = Paint.Style.STROKE
-            paint.strokeWidth = dp(3f)
-            val selected = bgTheme == options[i]
-            paint.color = if (selected) Color.parseColor("#FFEB3B") else Color.WHITE
-            paint.alpha = if (selected) 255 else 90
-            canvas.drawRoundRect(rects[i], dp(10f), dp(10f), paint)
-            paint.style = Paint.Style.FILL
-            paint.alpha = 255
-
-            paint.color = Color.BLACK
-            paint.alpha = 120
-            canvas.drawRect(rects[i].left, rects[i].bottom - dp(26f), rects[i].right, rects[i].bottom, paint)
-            paint.alpha = 255
-            drawOutlinedText(canvas, names[i], rects[i].centerX(), rects[i].bottom - dp(8f), buttonTextPaint)
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = dp(2.5f)
+                val selected = ballIndex == i
+                paint.color = if (selected) Color.parseColor("#FFEB3B") else Color.WHITE
+                paint.alpha = if (selected) 255 else 80
+                canvas.drawRoundRect(r, dp(6f), dp(6f), paint)
+                paint.style = Paint.Style.FILL
+                paint.alpha = 255
+            }
         }
 
         drawBackButton(canvas)
@@ -1731,19 +1946,6 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         return RectF((screenW - w) / 2f, screenH * 0.30f, (screenW + w) / 2f, screenH * 0.30f + h)
     }
 
-    private fun accessoryRowY(index: Int): Float {
-        val lineGap = dp(30f)
-        val y0 = screenH * 0.40f
-        return y0 + lineGap * (3.2f + index)
-    }
-
-    private fun accessoryRemoveRect(index: Int): RectF {
-        val w = dp(74f)
-        val h = dp(24f)
-        val y = accessoryRowY(index) - dp(18f)
-        return RectF(screenW * 0.66f, y, screenW * 0.66f + w, y + h)
-    }
-
     private fun avatarPresetRects(): List<RectF> {
         val count = 5
         val d = dp(40f)
@@ -1751,6 +1953,19 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         val totalW = count * d + (count - 1) * gap
         val left = (screenW - totalW) / 2f
         val y = screenH * 0.66f
+        return (0 until count).map { i ->
+            val l = left + i * (d + gap)
+            RectF(l, y, l + d, y + d)
+        }
+    }
+
+    private fun themeIconRects(): List<RectF> {
+        val count = 4
+        val d = dp(46f)
+        val gap = dp(14f)
+        val totalW = count * d + (count - 1) * gap
+        val left = (screenW - totalW) / 2f
+        val y = screenH * 0.5f
         return (0 until count).map { i ->
             val l = left + i * (d + gap)
             RectF(l, y, l + d, y + d)
@@ -1801,20 +2016,49 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
             val lineGap = dp(30f)
 
             canvas.drawText("Gems: $gems", left, y, infoPaint); y += lineGap
-            canvas.drawText("Top score: $topScore", left, y, infoPaint); y += lineGap * 1.2f
+            canvas.drawText("Top score: $topScore", left, y, infoPaint)
 
-            canvas.drawText("Accessories:", left, y, Paint(infoPaint).apply { color = colorGold }); y += lineGap
+            val themeLabelPaint = Paint(levelPaint).apply { textSize = dp(16f); color = colorGold }
+            canvas.drawText("Shop themes:", screenW / 2f, screenH * 0.465f, themeLabelPaint)
 
-            val accessoryLabels = listOf("Cannon", "Double Cannon", "Bombs")
-            val accessoryOwned = booleanArrayOf(cannonLevel >= 1, cannonLevel >= 2, bombsUnlocked)
-            for (i in accessoryLabels.indices) {
-                val rowY = accessoryRowY(i)
-                canvas.drawText("• ${accessoryLabels[i]}: ${if (accessoryOwned[i]) "Owned" else "-"}", left, rowY, infoPaint)
-                if (accessoryOwned[i]) {
-                    val r = accessoryRemoveRect(i)
-                    drawBeveledButton(canvas, r, Color.parseColor("#EF5350"))
-                    drawOutlinedText(canvas, "Remove", r.centerX(), r.centerY() + dp(5f), Paint(buttonTextPaint).apply { textSize = dp(12f) })
+            val themeRects = themeIconRects()
+            val themeNames = listOf("Soccer", "Basketball", "Hockey", "Space")
+            val themeOwned = booleanArrayOf(themeSoccerOwned, themeBasketballOwned, themeHockeyOwned, themeSpaceOwned)
+            for (i in themeRects.indices) {
+                val r = themeRects[i]
+                val pack = ThemePack.values()[i + 1]
+                paint.color = Color.parseColor("#13294F")
+                canvas.drawRoundRect(r, dp(8f), dp(8f), paint)
+                if (themeOwned[i]) {
+                    drawThemeBall(canvas, r.centerX(), r.centerY(), r.width() * 0.34f, pack)
+                } else {
+                    paint.color = Color.parseColor("#455A64")
+                    canvas.drawCircle(r.centerX(), r.centerY(), r.width() * 0.3f, paint)
+                    paint.color = Color.parseColor("#CFD8DC")
+                    canvas.drawRoundRect(
+                        RectF(r.centerX() - dp(6f), r.centerY() - dp(1f), r.centerX() + dp(6f), r.centerY() + dp(8f)),
+                        dp(2f), dp(2f), paint
+                    )
+                    paint.style = Paint.Style.STROKE
+                    paint.strokeWidth = dp(2f)
+                    canvas.drawArc(
+                        RectF(r.centerX() - dp(5f), r.centerY() - dp(9f), r.centerX() + dp(5f), r.centerY() + dp(1f)),
+                        180f, 180f, false, paint
+                    )
+                    paint.style = Paint.Style.FILL
                 }
+
+                val active = themeOwned[i] && activeThemePack == pack
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = dp(2.5f)
+                paint.color = if (active) Color.parseColor("#FFEB3B") else Color.WHITE
+                paint.alpha = if (active) 255 else if (themeOwned[i]) 90 else 40
+                canvas.drawRoundRect(r, dp(8f), dp(8f), paint)
+                paint.style = Paint.Style.FILL
+                paint.alpha = 255
+
+                val themeNamePaint = Paint(levelPaint).apply { textSize = dp(10f) }
+                canvas.drawText(themeNames[i], r.centerX(), r.bottom + dp(13f), themeNamePaint)
             }
 
             val choosePaint = Paint(levelPaint).apply { textSize = dp(16f) }
@@ -1864,20 +2108,16 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
                     val rects = menuButtonRects()
                     when {
                         rects[0].contains(event.x, event.y) -> {
-                            hardMode = false
+                            activeThemePack = ThemePack.NONE
                             pendingAction = PendingAction.RESTART_GAME
                         }
                         rects[1].contains(event.x, event.y) -> {
-                            hardMode = true
-                            pendingAction = PendingAction.RESTART_GAME
-                        }
-                        rects[2].contains(event.x, event.y) -> {
                             state = GameState.TOP_SCORE
                             (context as? Activity)?.let { LeaderboardManager.tryOpenLeaderboardUi(it) }
                         }
-                        rects[3].contains(event.x, event.y) -> state = GameState.BACKGROUND_SELECT
-                        rects[4].contains(event.x, event.y) -> state = GameState.BUY_GEMS
-                        rects[5].contains(event.x, event.y) -> state = GameState.ACCOUNT
+                        rects[2].contains(event.x, event.y) -> state = GameState.OPTIONS
+                        rects[3].contains(event.x, event.y) -> state = GameState.SHOP
+                        rects[4].contains(event.x, event.y) -> state = GameState.ACCOUNT
                     }
                 }
             }
@@ -1886,30 +2126,37 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
                     state = GameState.MENU
                 }
             }
-            GameState.BACKGROUND_SELECT -> {
+            GameState.OPTIONS -> {
                 if (event.action == MotionEvent.ACTION_DOWN) {
                     if (backButtonRect().contains(event.x, event.y)) {
                         state = GameState.MENU
                     } else {
-                        val rects = bgOptionRects()
-                        val options = BgTheme.values()
-                        for (i in rects.indices) {
-                            if (rects[i].contains(event.x, event.y)) {
-                                selectBackground(options[i])
+                        val tabRects = optionsTabRects()
+                        if (tabRects[0].contains(event.x, event.y)) {
+                            optionsTab = 0
+                        } else if (tabRects[1].contains(event.x, event.y)) {
+                            optionsTab = 1
+                        } else {
+                            val cellRects = optionsGridRects()
+                            for (i in cellRects.indices) {
+                                if (cellRects[i].contains(event.x, event.y)) {
+                                    if (optionsTab == 0 && i < freeBackgrounds.size) selectBackground(i)
+                                    if (optionsTab == 1 && i < freeBalls.size) selectBallSkin(i)
+                                }
                             }
                         }
                     }
                 }
             }
-            GameState.BUY_GEMS -> {
+            GameState.SHOP -> {
                 if (event.action == MotionEvent.ACTION_DOWN) {
                     if (backButtonRect().contains(event.x, event.y)) {
                         state = GameState.MENU
                     } else {
-                        val rects = gemPackRects()
+                        val rects = shopCardRects()
                         for (i in rects.indices) {
                             if (rects[i].contains(event.x, event.y)) {
-                                pendingStorePurchase = i
+                                pendingShopPurchase = i
                             }
                         }
                     }
@@ -1925,8 +2172,16 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
                         (context as? MainActivity)?.showRenameDialog(username)
                     } else if (isRegistered && uploadPhotoButtonRect().contains(event.x, event.y)) {
                         (context as? MainActivity)?.pickAvatarPhoto()
-                    } else if (isRegistered && (0..2).any { accessoryRemoveRect(it).contains(event.x, event.y) }) {
-                        pendingRemoveAccessory = (0..2).first { accessoryRemoveRect(it).contains(event.x, event.y) }
+                    } else if (isRegistered && themeIconRects().any { it.contains(event.x, event.y) }) {
+                        val themeRects = themeIconRects()
+                        val i = themeRects.indexOfFirst { it.contains(event.x, event.y) }
+                        val owned = booleanArrayOf(themeSoccerOwned, themeBasketballOwned, themeHockeyOwned, themeSpaceOwned)
+                        if (owned[i]) {
+                            activeThemePack = ThemePack.values()[i + 1]
+                            pendingAction = PendingAction.RESTART_GAME
+                        } else {
+                            state = GameState.SHOP
+                        }
                     } else if (isRegistered) {
                         val rects = avatarPresetRects()
                         for (i in rects.indices) {
@@ -1942,11 +2197,6 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
                     state = GameState.MENU
                 } else {
                     paddleX = event.x.coerceIn(paddleW / 2f, screenW - paddleW / 2f)
-                    if (event.action == MotionEvent.ACTION_DOWN &&
-                        kotlin.math.abs(event.x - screenW / 2f) < screenW * 0.15f
-                    ) {
-                        pendingBombLaunch = true
-                    }
                 }
             }
             GameState.LEVEL_CLEARED -> {

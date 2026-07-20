@@ -34,7 +34,11 @@ class MainActivity : AppCompatActivity() {
         LeaderboardManager.init(this)
         gameView = GameView(this)
         setContentView(gameView)
-        BillingManager.init(this) { amount -> gameView.grantGems(amount) }
+        BillingManager.init(
+            this,
+            onGemsGranted = { amount -> gameView.grantGems(amount) },
+            onThemeUnlocked = { themeId -> gameView.grantTheme(themeId) }
+        )
     }
 
     fun pickAvatarPhoto() {
